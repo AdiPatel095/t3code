@@ -125,6 +125,7 @@ import Migration0114 from "./Migrations/114_WorkflowRunParent.ts";
 import Migration0115 from "./Migrations/115_WorkflowStepResult.ts";
 import Migration0116 from "./Migrations/116_WorkflowWaitWatch.ts";
 import Migration0117 from "./Migrations/117_WorkflowStepTurn.ts";
+import Migration0118 from "./Migrations/118_WorkflowRunKey.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -245,6 +246,7 @@ const migrationEntries = [
   [115, "WorkflowStepResult", Migration0115],
   [116, "WorkflowWaitWatch", Migration0116],
   [117, "WorkflowStepTurn", Migration0117],
+  [118, "WorkflowRunKey", Migration0118],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
