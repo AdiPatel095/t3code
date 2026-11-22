@@ -2277,6 +2277,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.model-selection-updated",
       "thread.provider-switched",
       "thread.guest-share-updated",
+      "panel.updated",
     ]),
     payload: OrchestrationV2AppThread,
   }),
@@ -3232,6 +3233,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.model-selection-updated",
       "thread.provider-switched",
       "thread.guest-share-updated",
+      "panel.updated",
     ]),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -3359,6 +3361,32 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
 export type OrchestrationV2DomainEventJson = typeof OrchestrationV2DomainEventJson.Type;
 
 export const OrchestrationV2Command = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("panel.create"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    threadId: ThreadId,
+    participants: Schema.Array(
+      Schema.Struct({ role: OrchestrationV2PanelRole, modelSelection: ModelSelection }),
+    ),
+    rounds: PositiveInt,
+    topicMessageId: MessageId,
+    topic: Schema.String,
+    createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("panel.post"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    text: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("panel.continue"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
     commandId: CommandId,
@@ -3892,6 +3920,28 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("panel.open"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    threadId: ThreadId,
+    participants: Schema.Array(OrchestrationV2PanelParticipant),
+    rounds: PositiveInt,
+    topicMessageId: MessageId,
+    topic: Schema.String,
+    createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("panel.turn.settle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    trigger: Schema.Union([
+      Schema.Struct({ type: Schema.Literal("run_ended"), runId: RunId }),
+      Schema.Struct({ type: Schema.Literal("time_limit"), runId: RunId }),
+      Schema.Struct({ type: Schema.Literal("recovery") }),
+    ]),
+  }),
   // The server issues this after checking the value against the run's declared schema.
   Schema.Struct({
     type: Schema.Literal("run.output.submit"),

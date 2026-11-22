@@ -983,6 +983,8 @@ function preserveRunRecordedFields(
   next: OrchestrationV2Run,
 ): OrchestrationV2Run {
   if (current === undefined) return next;
+  const recordedTurn = current.panelTurn;
+  const nextTurn = next.panelTurn;
   return {
     ...next,
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
@@ -994,6 +996,26 @@ function preserveRunRecordedFields(
       : {}),
     // Only a submission sets the output; a lifecycle write carries it as it was when read.
     ...(current.output !== undefined ? { output: current.output } : {}),
+    ...(recordedTurn === undefined
+      ? {}
+      : {
+          panelTurn:
+            nextTurn === undefined
+              ? recordedTurn
+              : {
+                  ...nextTurn,
+                  ...(nextTurn.outcome === undefined && recordedTurn.outcome !== undefined
+                    ? { outcome: recordedTurn.outcome }
+                    : {}),
+                  ...(nextTurn.outcomeDetail === undefined &&
+                  recordedTurn.outcomeDetail !== undefined
+                    ? { outcomeDetail: recordedTurn.outcomeDetail }
+                    : {}),
+                  ...(nextTurn.lookup === undefined && recordedTurn.lookup !== undefined
+                    ? { lookup: recordedTurn.lookup }
+                    : {}),
+                },
+        }),
   };
 }
 
@@ -1064,6 +1086,7 @@ export function applyToProjection(
     case "thread.unpinned":
     case "thread.pin-reordered":
     case "thread.metadata-updated":
+    case "panel.updated":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "thread.model-selection-updated":
@@ -2274,6 +2297,14 @@ function shellFromState(input: {
     ...(input.state.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: input.state.thread.delegatedFrom }),
+    ...(input.state.thread.panel === undefined
+      ? {}
+      : {
+          panel: {
+            status: input.state.thread.panel.status,
+            idleReason: input.state.thread.panel.idleReason,
+          },
+        }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -2421,6 +2452,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ELSE ${payload}
       END
     `;
+    const keepRecordedPanelTurn = (payload: Statement.Fragment) => sql`
+      CASE
+        WHEN json_type(orchestration_v2_projection_runs.payload_json, '$.panelTurn') IS NOT NULL
+        THEN json_set(
+          ${payload},
+          '$.panelTurn',
+          json_patch(
+            json_extract(orchestration_v2_projection_runs.payload_json, '$.panelTurn'),
+            COALESCE(json_extract(excluded.payload_json, '$.panelTurn'), '{}')
+          )
+        )
+        ELSE ${payload}
+      END
+    `;
 
     type TimelineIndexItem = Pick<
       OrchestrationV2TurnItem,
@@ -2519,6 +2564,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.visited":
             case "thread.marked-unread":
             case "thread.metadata-updated":
+            case "panel.updated":
             case "thread.pull-request-synced":
             case "thread.issue-synced":
             case "thread.runtime-mode-updated":
@@ -2615,10 +2661,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status = excluded.status,
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
-                payload_json = ${keepRecordedRunOutput(
-                  keepRecordedRunField(
-                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
-                    "$.restartCancelledBackgroundWork",
+                payload_json = ${keepRecordedPanelTurn(
+                  keepRecordedRunOutput(
+                    keepRecordedRunField(
+                      keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                      "$.restartCancelledBackgroundWork",
+                    ),
                   ),
                 )}
             `;
@@ -3373,6 +3421,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.visit-recorded" &&
             event.type !== "thread.marked-unread" &&
             event.type !== "thread.metadata-updated" &&
+            event.type !== "panel.updated" &&
             event.type !== "thread.pull-request-synced" &&
             event.type !== "thread.issue-synced" &&
             event.type !== "thread.pull-request-link-updated" &&
@@ -5008,6 +5057,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ELSE 0 END
             )
             AND t.archived_at IS NULL
+            AND json_extract(t.payload_json, '$.panel') IS NULL
             AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
             AND json_valid(item.payload_json)
             AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
@@ -5099,6 +5149,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               json_extract(payload_json, '$.snoozedUntil') AS snoozed_until
             FROM orchestration_v2_projection_threads
             WHERE deleted_at IS NULL
+              AND json_extract(payload_json, '$.panel') IS NULL
               AND json_extract(payload_json, '$.limitRecovery.autoResume') = 1
           )
         `;

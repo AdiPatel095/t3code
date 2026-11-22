@@ -437,7 +437,10 @@ export const withWorkspaceModels = (
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
 /** A provider that lists no models accepts any slug. */
-export const requireAdvertisedModel = (provider: ServerProvider, model: string) => {
+export const requireAdvertisedModel = (
+  provider: ServerProvider,
+  model: string,
+): Effect.Effect<void, OrchestratorMcpFailure> => {
   if (provider.models.length === 0 || advertisedModel(provider, model) !== undefined) {
     return Effect.void;
   }
@@ -455,7 +458,7 @@ export const requireAdvertisedModel = (provider: ServerProvider, model: string) 
   );
 };
 
-function providerConstraints(
+export function providerConstraints(
   provider: ServerProvider | undefined,
   supportsOrchestrationV2: boolean,
 ): ReadonlyArray<string> {

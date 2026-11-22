@@ -2027,6 +2027,9 @@ export const layerWsRpc = (
             ...(command.type === "thread.fork" || command.type === "thread.merge_back"
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
               : {}),
+            ...(command.type === "panel.create"
+              ? { "orchestration_v2.parent_thread_id": command.parentThreadId }
+              : {}),
           }).pipe(
             Effect.andThen(
               startup

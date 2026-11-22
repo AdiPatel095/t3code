@@ -62,6 +62,7 @@ import * as Stream from "effect/Stream";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import { ProjectionStoreThreadNotFoundError } from "./ProjectionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
@@ -74,6 +75,8 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
 import { checkOutput, outputRequestProblem } from "./runOutput.ts";
+
+const isProjectionStoreThreadNotFoundError = Schema.is(ProjectionStoreThreadNotFoundError);
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -98,6 +101,7 @@ export function withCreationProvenance(
       return { ...rest, ...provenance };
     }
     case "message.dispatch":
+    case "panel.create":
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request":
@@ -122,6 +126,9 @@ function existingThreadIdsForCommand(
       return [];
     case "thread.fork":
       return [command.sourceThreadId];
+    case "panel.create":
+    case "panel.open":
+      return [command.parentThreadId];
     case "thread.merge_back":
       return command.sourceThreadId === command.targetThreadId
         ? [command.sourceThreadId]
@@ -785,30 +792,84 @@ const make = Effect.gen(function* () {
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
     );
 
+  const assertPanelAllowsCommand = Effect.fn("ThreadManagementService.assertPanelAllowsCommand")(
+    function* (command: OrchestrationV2ServerCommand, threadId: ThreadId, allowMissing = false) {
+      const projection = yield* orchestrator.getThreadRecords(threadId, []).pipe(
+        Effect.catchTags({
+          OrchestratorProjectionError: (error) =>
+            allowMissing && isProjectionStoreThreadNotFoundError(error.cause)
+              ? Effect.succeed(null)
+              : Effect.fail(error),
+        }),
+      );
+      if (projection?.thread.panel !== undefined) {
+        return yield* new Orchestrator.OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This command isn't available in panel chats.",
+        });
+      }
+    },
+  );
+
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
       case "thread.metadata.update":
-        return command.continuation === undefined
-          ? Effect.void
-          : orchestrator.getThreadRecords(command.threadId, []).pipe(
-              Effect.flatMap((projection) =>
-                assertProviderInstanceEnabled({
-                  projectId: projection.thread.projectId,
-                  commandId: command.commandId,
-                  instanceId: projection.thread.modelSelection.instanceId,
-                }),
-              ),
-            );
-      case "message.dispatch":
+      case "message.dispatch": {
+        if (command.type === "thread.metadata.update" && command.continuation === undefined) {
+          return command.limitRecovery == null
+            ? Effect.void
+            : assertPanelAllowsCommand(command, command.threadId);
+        }
         return orchestrator.getThreadRecords(command.threadId, []).pipe(
-          Effect.flatMap((projection) =>
-            assertProviderInstanceEnabled({
-              projectId: projection.thread.projectId,
-              commandId: command.commandId,
-              instanceId: (command.modelSelection ?? projection.thread.modelSelection).instanceId,
-            }),
+          Effect.flatMap(
+            ({
+              thread,
+            }): Effect.Effect<
+              void,
+              Orchestrator.OrchestratorDispatchError | ThreadManagementProviderInstanceDisabledError
+            > =>
+              thread.panel !== undefined
+                ? new Orchestrator.OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: "Update the app to post in a panel chat.",
+                  })
+                : assertProviderInstanceEnabled({
+                    projectId: thread.projectId,
+                    commandId: command.commandId,
+                    instanceId:
+                      (command.type === "message.dispatch"
+                        ? command.modelSelection?.instanceId
+                        : undefined) ?? thread.modelSelection.instanceId,
+                  }),
           ),
         );
+      }
+      case "thread.fork":
+      case "thread.merge_back":
+        return assertPanelAllowsCommand(command, command.sourceThreadId).pipe(
+          Effect.andThen(
+            assertPanelAllowsCommand(
+              command,
+              command.targetThreadId,
+              command.type === "thread.fork",
+            ),
+          ),
+        );
+      case "checkpoint.rollback":
+      case "provider.switch":
+      case "thread.runtime-mode.set":
+      case "thread.interaction-mode.set":
+      case "thread.model-selection.set":
+      case "queued-message.promote-to-steer":
+      case "queued-run.start":
+      case "queued-run.reorder":
+      case "queued-run.cancel":
+      case "queued-run.edit":
+      case "queue.resume":
+      case "thread.snooze":
+        return assertPanelAllowsCommand(command, command.threadId);
       case "delegated_task.request":
         return orchestrator.getThreadRecords(command.parentThreadId, []).pipe(
           Effect.flatMap((parent) =>
