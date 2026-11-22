@@ -305,7 +305,7 @@ back the standard rows.
 
 ## Open a thread beside the one you are in
 
-On web and desktop, a subagent, a side chat, and a
+On web and desktop, a subagent, a side chat, a panel chat, and a
 [thread on a linked machine](remote-access.md#read-a-linked-machines-threads)
 all open the same way. Click one to open it as a tab in the right panel, so the
 thread you are in stays in view. Hold ⌘ (Ctrl on Windows and Linux) while you
@@ -313,9 +313,9 @@ click, or middle-click, to open it in the main view instead. With the keyboard,
 Enter and ⌘/Ctrl + Enter do the same. Right-click for **Open in side panel** and
 **Open in main view**.
 
-To make the main view the place a plain click opens them, set **Settings → Chat →
-Open subagents and side chats in** to **Main view**. The modifier then opens
-the side panel.
+The **Settings → Chat → Open subagents and side chats in** setting also
+covers panel chats. Set it to **Main view** to open these threads there with a
+plain click. The modifier then opens the side panel.
 
 From a tab, **Open in main view** at the top of the tab, or in the tab's
 right-click menu, moves it to the main view. The bottom of the view depends on
@@ -358,6 +358,22 @@ unarchiving the thread brings them back.
 
 On mobile, a thread lists its side chats above the composer. Tap one to open it and
 answer its questions.
+
+## Panel chats
+
+A panel chat lets several models discuss a topic while you watch and steer. It belongs to the thread you start it from and does not add to that thread.
+
+On web and desktop, type `/panel` and your topic, or choose **Panel chat** from the **+** menu in the right panel. Pick two to five models, set how many rounds they get, and start. In each round every model replies once, in order, briefly. When the rounds are used up, or as soon as every model agrees, the first model writes the panel's conclusion. Choose **Continue** for more rounds, or **Stop** at any time.
+
+Send a message to the panel to steer it. Everyone answers a plain message. Start it with `@` and a model's name to have only that model answer.
+
+Add a **Code agent** to let the panel check the project's code. It only reads. The other models never read the code themselves, which keeps a panel cheap: they ask the code agent, and it answers with a short summary. A model asks it by starting a line with `@code`, and you can ask it the same way. Codex, Claude and OpenCode can be the code agent.
+
+Models in a panel cannot edit files or run commands, and they do not see the thread's conversation: put what they need in the topic. Cursor, Pi and ACP Registry agents cannot join a panel.
+
+To use the result, choose **Add to chat** at the top of the panel. Find a panel again under **Panel chats** in thread details. Deleting or archiving the thread does the same to its panels.
+
+On mobile you can read a thread's panels and stop or continue them.
 
 ## Snooze until later
 

@@ -245,6 +245,10 @@ type AppThreadLineage = {
 };
 ```
 
+A panel is a side-chat-class thread with a roster. Each panel turn runs in a fresh
+provider session with a server-composed prompt. Panel sessions never receive the
+T3 MCP server.
+
 Operational transfer details should live in `ContextTransfer`, not directly on `AppThread`, because a thread can participate in many transfers:
 
 - created by fork;
