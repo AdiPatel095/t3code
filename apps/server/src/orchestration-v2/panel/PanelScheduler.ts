@@ -158,7 +158,7 @@ function endOfRoundWithoutReplies(
   state: OrchestrationV2PanelState,
   run: OrchestrationV2PanelRunOfRounds,
 ): PanelDecision {
-  if (!run.roundAllPassed) return endRun(state, "no_replies");
+  if (!run.roundAllPassed && run.roundsCompleted === 0) return endRun(state, "no_replies");
   const concluding = { ...state, run: { ...run, agreed: run.roundAllPassed }, queue: [] };
   return takeNext(queueConclusion(concluding, run.round));
 }

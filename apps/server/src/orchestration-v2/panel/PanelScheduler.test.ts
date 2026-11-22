@@ -136,9 +136,12 @@ describe("open runs", () => {
     },
   );
 
-  it("ends no_replies for a round with only passes and skipped turns", () => {
+  it.each([
+    { outcomes: ["failed", "passed", "limited"] },
+    { outcomes: ["failed", "failed", "failed"] },
+  ] as const)("ends no_replies when the first round produces $outcomes", ({ outcomes }) => {
     let decision = openRunOfRounds(panel());
-    for (const outcome of ["failed", "passed", "limited"] as const) {
+    for (const outcome of outcomes) {
       decision = finish(decision, outcome);
     }
     expect(decision).toMatchObject({
@@ -147,21 +150,28 @@ describe("open runs", () => {
     });
   });
 
-  it("ends no_replies without a conclusion after an earlier round had a reply", () => {
-    let decision = openRunOfRounds(panel());
-    for (const outcome of ["replied", "passed", "failed", "passed", "failed", "passed"] as const) {
-      decision = finish(decision, outcome);
-    }
-    expect(decision).toMatchObject({
-      state: {
-        idleReason: "no_replies",
-        status: "idle",
+  it.each([
+    { outcome: "replied", idleReason: "concluded" },
+    { outcome: "failed", idleReason: "rounds_done" },
+  ] as const)(
+    "ends $idleReason when a later round fails and the conclusion is $outcome",
+    ({ outcome, idleReason }) => {
+      let decision = openRunOfRounds(panel({ rounds: 3, cursor: "p2" }));
+      for (const reply of ["replied", "passed", "failed", "failed", "failed", "failed"] as const) {
+        decision = finish(decision, reply);
+      }
+      expect(decision.next).toEqual({ participantId: "p1", kind: "conclusion", round: 2 });
+      expect(decision.state).toMatchObject({
+        status: "running",
         queue: [],
         run: { roundsCompleted: 1, agreed: false },
-      },
-      next: null,
-    });
-  });
+      });
+      expect(finish(decision, outcome)).toMatchObject({
+        state: { status: "idle", idleReason, queue: [], cursor: "p2" },
+        next: null,
+      });
+    },
+  );
 
   it("rotates after the cursor and ignores a new Continue while the panel is running", () => {
     const initial = openRunOfRounds(panel({ cursor: "p2" }));

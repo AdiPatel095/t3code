@@ -70,6 +70,7 @@ const panelThreadId = ThreadId.make("thread:panel");
 const codex = ProviderInstanceId.make("codex");
 const claude = ProviderInstanceId.make("claudeAgent");
 const model = "panel-model";
+const alternateModel = "alternate-panel-model";
 const selection = (instanceId: ProviderInstanceId, effort: string) => ({
   instanceId,
   model,
@@ -132,6 +133,7 @@ const providerSnapshot = (
         ],
       },
     },
+    { slug: alternateModel, name: "Alternate Panel Model", isCustom: false, capabilities: null },
   ],
   slashCommands: [],
   skills: [],
@@ -1093,9 +1095,16 @@ it.effect.each(["disabled", "removed"] as const)(
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         yield* createParent(fixture.cwd);
+        const codexSelection = selection(codex, "low");
         yield* dispatchClient({
           ...createPanel,
-          participants: [panelist(selection(claude, "low")), panelist(selection(codex, "low"))],
+          participants: [
+            panelist(selection(claude, "low")),
+            panelist({
+              ...codexSelection,
+              options: [...codexSelection.options, { id: "fastMode", value: true }],
+            }),
+          ],
         });
         const first = yield* orchestrator.getThreadProjection(panelThreadId);
         assert.deepEqual(
@@ -1137,12 +1146,18 @@ it.effect("schedules a code lookup and keeps its outcome through a stale lifecyc
       yield* createParent(fixture.cwd);
       yield* dispatchClient({
         ...createPanel,
-        participants: [codeAgent(selection(codex, "low")), ...createPanel.participants],
+        participants: [
+          codeAgent(selection(codex, "low")),
+          panelist(selection(codex, "low")),
+          panelist({ instanceId: codex, model: alternateModel }),
+        ],
       });
       const first = yield* orchestrator.getThreadProjection(panelThreadId);
+      assert.equal(first.thread.panel?.participants[0]?.name, "Panel Model");
       assert.include(first.thread.panel?.participants[2], {
         id: "code",
         handle: "code",
+        name: "Panel Model",
         toolsRemoved: true,
       });
       yield* Ref.set(fixture.reply, {

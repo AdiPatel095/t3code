@@ -6,7 +6,6 @@ import {
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import {
-  createModelSelection,
   getProviderOptionCurrentLabel,
   getProviderOptionDescriptors,
   modelSelectionsEqual,
@@ -228,24 +227,19 @@ const make = Effect.gen(function* () {
       });
     }
     const participants = resolved.map(({ participant, instanceName, effortLabel }) => {
+      if (participant.role !== "panelist") return participant;
       const peers = resolved.filter(
-        (other) => other.participant !== participant && other.participant.name === participant.name,
+        (other) =>
+          other.participant.role === "panelist" &&
+          other.participant !== participant &&
+          other.participant.name === participant.name,
       );
       if (peers.length === 0) return participant;
-      const equalOptions = peers.some(({ participant: other }) =>
-        modelSelectionsEqual(
-          participant.modelSelection,
-          createModelSelection(
-            participant.modelSelection.instanceId,
-            participant.modelSelection.model,
-            other.modelSelection.options,
-          ),
-        ),
-      );
-      return {
-        ...participant,
-        name: `${participant.name} · ${equalOptions ? instanceName : (effortLabel ?? instanceName)}`,
-      };
+      const suffix =
+        effortLabel !== undefined && peers.every((peer) => peer.effortLabel !== effortLabel)
+          ? effortLabel
+          : instanceName;
+      return { ...participant, name: `${participant.name} · ${suffix}` };
     });
 
     return yield* orchestrator.dispatch({ ...command, type: "panel.open", participants, topic });
