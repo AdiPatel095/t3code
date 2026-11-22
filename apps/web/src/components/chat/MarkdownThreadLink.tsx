@@ -1,7 +1,7 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { useGT, useMessages } from "gt-react";
-import { MessagesSquareIcon } from "lucide-react";
+import { MessagesSquareIcon, UsersRoundIcon } from "lucide-react";
 import {
   formatHostedThreadLink,
   guessThreadLinkRef,
@@ -116,7 +116,7 @@ export function MarkdownThreadLink(props: {
               }
               aria-label={gt("Thread, {title}", { title })}
             >
-              <MessagesSquareIcon />
+              {written?.source.panel ? <UsersRoundIcon /> : <MessagesSquareIcon />}
               <ContextChipLabel>{title}</ContextChipLabel>
             </ContextChip>
           }

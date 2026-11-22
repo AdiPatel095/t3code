@@ -84,6 +84,8 @@ export function useComposerMenuItems({
   threadPullRequests,
   sideChatAvailable,
   sideChatDisabledReason,
+  panelChatOffered,
+  panelChatDisabledReason,
   freshSessionAvailable,
   compactSlashCommandAvailable,
   selectedProvider,
@@ -104,6 +106,8 @@ export function useComposerMenuItems({
   readonly threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
+  readonly panelChatOffered: boolean;
+  readonly panelChatDisabledReason: string | null;
   readonly freshSessionAvailable: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
@@ -290,6 +294,20 @@ export function useComposerMenuItems({
               },
             ] as const)
           : []),
+        ...(panelChatOffered && composerTrigger.rangeStart === 0
+          ? ([
+              {
+                id: "slash:panel",
+                type: "slash-command",
+                command: "panel",
+                label: "/panel",
+                description:
+                  panelChatDisabledReason ??
+                  gt("Start a panel chat where several models discuss a topic"),
+                disabled: panelChatDisabledReason !== null,
+              },
+            ] as const)
+          : []),
         ...(freshSessionAvailable
           ? ([
               {
@@ -333,7 +351,8 @@ export function useComposerMenuItems({
       const visibleProviderSlashCommandItems = providerSlashCommandItems.filter(
         (item) =>
           (item.command.name !== "compact" || compactSlashCommandAvailable) &&
-          (item.command.name !== "clear" || !freshSessionAvailable),
+          (item.command.name !== "clear" || !freshSessionAvailable) &&
+          (item.command.name !== "panel" || !panelChatOffered),
       );
       const slashCommandItems = slashCommandItemsForPromptPosition(
         [...builtInSlashCommandItems, ...visibleProviderSlashCommandItems, ...skillItems],

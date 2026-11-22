@@ -8,6 +8,7 @@ import {
 
 const usage = THREAD_DETAILS_ITEMS.find((item) => item.id === "usage")!;
 const servers = THREAD_DETAILS_ITEMS.find((item) => item.id === "servers")!;
+const panelChats = THREAD_DETAILS_ITEMS.find((item) => item.id === "panelChats")!;
 
 describe("thread details items", () => {
   it.each([
@@ -23,6 +24,7 @@ describe("thread details items", () => {
     expect(visibility.usage).toBe(row.usage);
     expect(visibility.context).toBe(row.context);
     expect(visibility.servers).toBe(true);
+    expect(visibility.panelChats).toBe(true);
   });
 
   it("stores only choices that differ from the default", () => {
@@ -32,5 +34,9 @@ describe("thread details items", () => {
 
     const hidden = { threadDetailsItems: { servers: false }, threadDetailsUsageEnabled: false };
     expect(setThreadDetailsItem(hidden, servers, true)).toEqual({});
+    expect(setThreadDetailsItem(hidden, panelChats, false)).toEqual({
+      servers: false,
+      panelChats: false,
+    });
   });
 });

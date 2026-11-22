@@ -218,6 +218,7 @@ import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import {
   isInSideChatPane,
+  openSideThread,
   resolveThreadOpenRoute,
   type SideChatParentPanel,
 } from "~/lib/sideChatPane";
@@ -300,6 +301,8 @@ import type { ComposerPromptEditorHandle } from "./ComposerPromptEditorTiptap";
 import { panelTimelineAnnotations } from "@t3tools/client-runtime/panel-chat";
 import { PanelAddToChat, PanelDeleteButton, PanelRoster } from "./chat/PanelThreadPane";
 import { PanelStatusBar, usePanelControl } from "./chat/PanelStatusBar";
+import { PanelSetupDialog } from "./chat/PanelSetupDialog";
+import { PANEL_SETUP_REASONS } from "./chat/PanelSetupDialog.logic";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
 import {
@@ -3030,6 +3033,51 @@ export default function ChatView(props: ChatViewProps) {
   const openSideChatStable = useStableCallback(() => void sideChat.open());
   const openSurfaceInMainView = useOpenSurfaceInMainView(activeThreadRef);
   const sendSideChatStable = useStableCallback(sideChat.open);
+  const panelChatOffered =
+    activeThreadRef !== null &&
+    !embedded &&
+    !isPanel &&
+    activeThread?.lineage.sideChat !== true &&
+    !isSubagentThread &&
+    activeThread?.archivedAt == null &&
+    serverConfig?.environment.capabilities.panelChats === true;
+  const panelChatParentReady = isServerThread && activeMessageCount > 0;
+  const panelChatPermissionReason = canOperateThread
+    ? null
+    : gt("You don't have permission to run agents in this environment.");
+  const panelChatDisabledReason = !panelChatOffered
+    ? null
+    : panelChatParentReady
+      ? panelChatPermissionReason
+      : messages(PANEL_SETUP_REASONS.firstMessage);
+  const [panelSetup, setPanelSetup] = useState<{ key: string; topic?: string } | null>(null);
+  function openPanelSetup(topic?: string) {
+    if (
+      !panelChatOffered ||
+      panelChatDisabledReason !== null ||
+      activeThreadRef === null ||
+      !readEnvironmentScope(activeThreadRef.environmentId, AuthOrchestrationOperateScope)
+    )
+      return false;
+    setPanelSetup({ key: scopedThreadKey(activeThreadRef), ...(topic ? { topic } : {}) });
+    return true;
+  }
+  const openPanelSetupStable = useStableCallback(() => void openPanelSetup());
+  const openPanelSetupFromComposer = useStableCallback(openPanelSetup);
+  const closePanelSetupStable = useStableCallback((threadId: ThreadId | null) => {
+    setPanelSetup(null);
+    if (threadId === null || activeThreadRef === null) return;
+    openSideThread({
+      threadRef: scopeThreadRef(activeThreadRef.environmentId, threadId),
+      panelRef: activeThreadRef,
+      intent: "primary",
+      navigate: (threadRef) =>
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(threadRef),
+        }),
+    });
+  });
   const { onConfirmRevertStable, onForkFromRunStable, onRevertTimelineTurnStable } =
     useTimelineRewind({
       environmentId,
@@ -3175,6 +3223,8 @@ export default function ChatView(props: ChatViewProps) {
     acknowledgeActiveThreadWoke,
     onSideChat: sideChat.available ? sendSideChatStable : undefined,
     sideChatDisabledReason,
+    onPanelChat: panelChatOffered ? openPanelSetupFromComposer : undefined,
+    panelChatDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -3976,6 +4026,8 @@ export default function ChatView(props: ChatViewProps) {
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}
                                 sideChatAvailable={sideChat.available}
                                 sideChatDisabledReason={sideChatDisabledReason}
+                                panelChatOffered={panelChatOffered}
+                                panelChatDisabledReason={panelChatDisabledReason}
                                 onFreshSession={
                                   freshSessionCommandAvailable ? armFreshSessionStable : undefined
                                 }
@@ -4327,6 +4379,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
+          onAddPanelChat={panelChatOffered ? openPanelSetupStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && diffAvailable}
@@ -4336,6 +4389,8 @@ export default function ChatView(props: ChatViewProps) {
           deviceAvailable={activeThreadRef !== null}
           sideChatAvailable={sideChat.available}
           sideChatDisabledReason={sideChatDisabledReason}
+          panelChatAvailable={panelChatParentReady}
+          panelChatDisabledReason={panelChatParentReady ? panelChatPermissionReason : null}
         >
           {rightPanelContent}
         </ChatRightPanel>
@@ -4350,6 +4405,20 @@ export default function ChatView(props: ChatViewProps) {
         onConfirm={onConfirmRevertStable}
       />
       {embedded ? null : <LinkPullRequestDialogHost />}
+      {panelSetup !== null &&
+      panelSetup.key === activeThreadKey &&
+      activeThreadRef &&
+      activeThread ? (
+        <PanelSetupDialog
+          key={panelSetup.key}
+          parentRef={activeThreadRef}
+          threadModel={activeThread.modelSelection}
+          providers={providerInstanceEntries}
+          workspaceCwd={gitCwd}
+          {...(panelSetup.topic === undefined ? {} : { topic: panelSetup.topic })}
+          onClose={closePanelSetupStable}
+        />
+      ) : null}
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />
     </div>

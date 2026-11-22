@@ -271,6 +271,7 @@ import { usePendingUserInputDraft } from "./usePendingThreadRequests";
 import type { PendingApproval, PendingUserInput, TimelineEntry } from "../../session-logic";
 import {
   composerRunsDraftLocally,
+  parsePanelComposerDraft,
   resolveComposerDispatchMode,
   type ComposerDispatchMode,
 } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -410,6 +411,8 @@ export interface ChatComposerProps {
   onUsageLimitsCommand?: (() => void) | undefined;
   sideChatAvailable?: boolean;
   sideChatDisabledReason?: string | null;
+  panelChatOffered?: boolean;
+  panelChatDisabledReason?: string | null;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1192,6 +1195,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     threadPullRequests,
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
+    panelChatOffered: props.panelChatOffered === true && !isEditingQueuedMessage,
+    panelChatDisabledReason: props.panelChatDisabledReason ?? null,
     freshSessionAvailable: props.onFreshSession !== undefined,
     compactSlashCommandAvailable,
     selectedProvider,
@@ -1290,27 +1295,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     : null;
   const hasMessageToSend = composerSendState.hasSendableContent || messageHasPreparingImages;
+  const canRunPanelCommand =
+    props.panelChatOffered === true && !isEditingQueuedMessage && !activePendingProgress;
+  const isPanelCommandDraft = canRunPanelCommand && parsePanelComposerDraft(prompt) !== null;
   const showResumeAction =
     canResume &&
     !composerDraftHasUserContent(composerDraft) &&
     !messageHasPreparingImages &&
     !isEditingQueuedMessage;
-  const collapsedComposerPrimaryActionDisabled =
-    phase === "running" ||
-    isSendBusy ||
-    composerSendHeld ||
-    isSendDisabled ||
-    noProviderAvailable ||
-    projectSelectionRequired ||
-    environmentUnavailable !== null ||
-    (!hasMessageToSend && !showResumeAction);
-  const collapsedComposerPrimaryActionLabel = composerSendHeld
-    ? gt("Sending when ready")
-    : showResumeAction
-      ? gt("Resume thread")
-      : props.resumeCompactionTokens !== null && !props.keepFullHistory
-        ? gt("Open composer to compact and send")
-        : gt("Send message");
+  const collapsedComposerPrimaryActionDisabled = isPanelCommandDraft
+    ? !canOperateThread
+    : phase === "running" ||
+      isSendBusy ||
+      composerSendHeld ||
+      isSendDisabled ||
+      noProviderAvailable ||
+      projectSelectionRequired ||
+      environmentUnavailable !== null ||
+      (!hasMessageToSend && !showResumeAction);
+  const collapsedComposerSendPending = !isPanelCommandDraft && (composerSendHeld || isSendBusy);
+  const collapsedComposerPrimaryActionLabel =
+    !isPanelCommandDraft && composerSendHeld
+      ? gt("Sending when ready")
+      : showResumeAction
+        ? gt("Resume thread")
+        : !isPanelCommandDraft && props.resumeCompactionTokens !== null && !props.keepFullHistory
+          ? gt("Open composer to compact and send")
+          : gt("Send message");
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
 
@@ -2043,8 +2054,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         return;
       }
-      if (item.command === "side" || item.command === "btw") {
-        if (props.sideChatDisabledReason) return;
+      if (item.command === "side" || item.command === "btw" || item.command === "panel") {
+        if (item.command === "panel" ? item.disabled : props.sideChatDisabledReason) return;
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
@@ -2306,6 +2317,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
       });
       return false;
+    }
+    if (canRunPanelCommand && parsePanelComposerDraft(promptRef.current)) {
+      event?.preventDefault();
+      if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
+      setComposerSubmissionError(null);
+      onSend(undefined, "auto", submissionIntent);
+      return true;
     }
     if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
       event?.preventDefault();
@@ -2685,6 +2703,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerEnvironmentContexts.length === 0 &&
       replyTo === null,
     sideChat: props.sideChatAvailable === true || (props.sideChatDisabledReason ?? null) !== null,
+    panelChat: canRunPanelCommand,
     usageLimits: props.onUsageLimitsCommand !== undefined,
     codexFeedback: selectedProvider === "codex" && multipleModelSelections === null,
     freshSession: props.onFreshSession !== undefined,
@@ -3722,17 +3741,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     className="flex size-8 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground hover:bg-message-action-hover disabled:opacity-64"
                     disabled={collapsedComposerPrimaryActionDisabled}
                     aria-label={collapsedComposerPrimaryActionLabel}
-                    aria-busy={composerSendHeld || isSendBusy || undefined}
+                    aria-busy={collapsedComposerSendPending || undefined}
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={(event) => {
                       event.stopPropagation();
                       if (showResumeAction) onResume();
-                      else if (props.resumeCompactionTokens !== null && !props.keepFullHistory)
+                      else if (
+                        !isPanelCommandDraft &&
+                        props.resumeCompactionTokens !== null &&
+                        !props.keepFullHistory
+                      )
                         expandMobileComposer();
                       else submitComposer();
                     }}
                   >
-                    {composerSendHeld || isSendBusy ? (
+                    {collapsedComposerSendPending ? (
                       <Spinner size="sm" aria-hidden="true" />
                     ) : showResumeAction ? (
                       <PlayIcon className="size-4 fill-current" aria-hidden="true" />
@@ -4034,11 +4057,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       },
                     )}
                     voiceInputActive={voiceInputActive}
-                    isSendBusy={isSendBusy}
-                    isSendHeld={composerSendHeld}
-                    sendDisabledReason={primaryActionSendDisabledReason}
-                    isEnvironmentUnavailable={primaryActionEnvironmentUnavailable}
-                    isPreparingWorktree={isPreparingWorktree}
+                    isSendBusy={isSendBusy && !isPanelCommandDraft}
+                    isSendHeld={composerSendHeld && !isPanelCommandDraft}
+                    sendDisabledReason={
+                      isPanelCommandDraft ? null : primaryActionSendDisabledReason
+                    }
+                    isEnvironmentUnavailable={
+                      primaryActionEnvironmentUnavailable && !isPanelCommandDraft
+                    }
+                    isPreparingWorktree={isPreparingWorktree && !isPanelCommandDraft}
                     hasSendableContent={hasMessageToSend || voiceInputActive}
                     canResume={showResumeAction}
                     preserveComposerFocusOnPointerDown={isMobileViewport}

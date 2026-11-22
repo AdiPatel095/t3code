@@ -4,6 +4,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import { parsePanelComposerDraft } from "@t3tools/client-runtime/state/composer-dispatch";
 import { readWorktreeBaseBranch } from "../../worktreeRepositoryChoiceStore";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
@@ -284,6 +285,8 @@ interface ComposerSendInput {
   readonly onSideChat?: ((message: SideChatMessage | undefined) => Promise<boolean>) | undefined;
   /** Refuses `/side` with this reason and keeps the draft. */
   readonly sideChatDisabledReason: string | null;
+  readonly onPanelChat?: ((topic: string) => boolean) | undefined;
+  readonly panelChatDisabledReason?: string | null;
   readonly handleNewThreadInActiveProject: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
@@ -410,6 +413,8 @@ export function useComposerSend(input: ComposerSendInput) {
     acknowledgeActiveThreadWoke,
     onSideChat,
     sideChatDisabledReason,
+    onPanelChat,
+    panelChatDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -499,6 +504,25 @@ export function useComposerSend(input: ComposerSendInput) {
         : null;
     const answeringQuestion =
       Boolean(activePendingUserInput) && sendCtx?.answeringPendingUserInput !== false;
+    if (onPanelChat && !directAnnotation && !queuedRunEdit.isEditing && !answeringQuestion) {
+      const command = parsePanelComposerDraft(promptAtSend);
+      if (command) {
+        if (panelChatDisabledReason) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: m(msg("Could not start the panel chat")),
+              description: panelChatDisabledReason,
+            }),
+          );
+        } else if (isCurrentRouteThread() && onPanelChat(command.topic)) {
+          setComposerDraftPrompt(composerDraftTarget, command.retainedPrompt);
+          promptRef.current = command.retainedPrompt;
+          composerRef.current?.resetCursorState({ prompt: command.retainedPrompt });
+        }
+        return;
+      }
+    }
     const startsSideChat =
       onSideChat !== undefined && sideChatCommand !== null && sideChatDisabledReason === null;
     // An answer responds to the open request rather than starting a turn, so the new-message

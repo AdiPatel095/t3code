@@ -40,6 +40,7 @@ export interface ThreadContextDragGhost {
   readonly y: number;
   readonly title: string;
   readonly count: number;
+  readonly panel?: boolean;
 }
 
 let ghost: ThreadContextDragGhost | null = null;
@@ -74,7 +75,7 @@ function findDropTarget(point: { x: number; y: number }): HTMLElement | null {
 
 export function moveThreadContextDrag(
   point: { x: number; y: number },
-  label: { title: string; count: number },
+  label: Pick<ThreadContextDragGhost, "title" | "count" | "panel">,
 ) {
   const target = findDropTarget(point);
   if (target !== overTarget) {

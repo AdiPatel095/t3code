@@ -12,8 +12,10 @@ import {
   MousePointerClickIcon,
   QuoteIcon,
   TerminalIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 import type { ReactElement } from "react";
+import type { ThreadContextRecord } from "@t3tools/contracts";
 
 import { splitPromptIntoComposerSegments } from "~/composer-editor-mentions";
 import { composerFileNeedsReattach } from "~/composerDraftStore";
@@ -25,12 +27,13 @@ import { ContextChip, ContextChipLabel } from "../ContextChip";
 import { ContextChipShell } from "../contextChipParts";
 import { PierreEntryIcon } from "./PierreEntryIcon";
 import { SkillChipIcon } from "./SkillInlineText";
+import { useQuietThreadShell } from "../../state/entities";
 
 type Theme = "light" | "dark";
 
 // Upload progress and PR state stay with the editor, so the row shows each reference by kind.
 const CONTEXT_REFERENCE_ICONS: Record<
-  ComposerDraftContextRecord["kind"],
+  Exclude<ComposerDraftContextRecord["kind"], "thread">,
   (label: string, theme: Theme) => ReactElement
 > = {
   image: () => <ImageIcon />,
@@ -38,9 +41,20 @@ const CONTEXT_REFERENCE_ICONS: Record<
   terminal: () => <TerminalIcon />,
   "preview-annotation": () => <MousePointerClickIcon />,
   "review-comment": () => <MessageCircleIcon />,
-  thread: () => <MessagesSquareIcon />,
   environment: () => <MonitorIcon />,
 };
+
+function CollapsedThreadContext({ record, label }: { record: ThreadContextRecord; label: string }) {
+  const shell = useQuietThreadShell(record);
+  const isPanel = shell?.source.panel !== undefined;
+  return (
+    <ContextChipShell
+      kind="thread"
+      icon={isPanel ? <UsersRoundIcon /> : <MessagesSquareIcon />}
+      label={isPanel ? shell.title.trim() || label : label}
+    />
+  );
+}
 
 // Mirrors the editor's chip: only a draft record of the same kind resolves a reference.
 function resolvedContextRecord(
@@ -94,6 +108,9 @@ export function CollapsedComposerPromptPreview(props: {
         );
       case "context-reference": {
         const entry = resolvedContextRecord(props.contextRecords, segment.kind, segment.contextId);
+        if (entry?.kind === "thread") {
+          return <CollapsedThreadContext key={key} record={entry.record} label={segment.label} />;
+        }
         return entry ? (
           <ContextChipShell
             key={key}

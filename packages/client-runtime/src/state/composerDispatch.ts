@@ -1,4 +1,9 @@
-import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import {
+  isClearComposerCommand,
+  parsePanelCommand,
+  parseSideChatCommand,
+} from "@t3tools/shared/composerTrigger";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 
 import { parseCodexFeedbackCommand } from "./threadFeedback.ts";
@@ -55,16 +60,29 @@ export function alternateComposerDispatchAction(
   }) as ActiveTurnComposerAction;
 }
 
+export function parsePanelComposerDraft(text: string) {
+  const references: string[] = [];
+  const command = parsePanelCommand(
+    replaceComposerContextReferences(text, (reference) => {
+      references.push(reference.source);
+      return "";
+    }),
+  );
+  return command && { ...command, retainedPrompt: references.join(" ") };
+}
+
 /** The composer runs these drafts itself, so they never queue for or steer a running turn. */
 export function composerRunsDraftLocally(input: {
   readonly text: string;
   readonly holdsOnlyText: boolean;
   readonly sideChat: boolean;
+  readonly panelChat?: boolean;
   readonly usageLimits: boolean;
   readonly codexFeedback: boolean;
   readonly freshSession: boolean;
 }): boolean {
   if (input.sideChat && parseSideChatCommand(input.text) !== null) return true;
+  if (input.panelChat && parsePanelComposerDraft(input.text) !== null) return true;
   if (!input.holdsOnlyText) return false;
   return (
     (input.usageLimits && isUsageLimitsCommand(input.text)) ||

@@ -1,6 +1,10 @@
 import { expect, it } from "vite-plus/test";
 
-import { compactionBlocksSteering, composerRunsDraftLocally } from "./composerDispatch.ts";
+import {
+  compactionBlocksSteering,
+  composerRunsDraftLocally,
+  parsePanelComposerDraft,
+} from "./composerDispatch.ts";
 
 it("blocks steering for explicit compaction, and for automatic compaction unless the provider takes steers then", () => {
   const during = (
@@ -52,6 +56,7 @@ it("treats only the commands the composer runs itself as local", () => {
   const none = {
     holdsOnlyText: true,
     sideChat: false,
+    panelChat: false,
     usageLimits: false,
     codexFeedback: false,
     freshSession: false,
@@ -59,15 +64,28 @@ it("treats only the commands the composer runs itself as local", () => {
   const all = {
     ...none,
     sideChat: true,
+    panelChat: true,
     usageLimits: true,
     codexFeedback: true,
     freshSession: true,
   };
-  for (const text of ["/btw why?", "/usage-limits", "/feedback slow", "/clear"]) {
+  for (const text of ["/btw why?", "/PANEL why?", "/usage-limits", "/feedback slow", "/clear"]) {
     expect(composerRunsDraftLocally({ ...all, text })).toBe(true);
     expect(composerRunsDraftLocally({ ...none, text })).toBe(false);
   }
   expect(composerRunsDraftLocally({ ...all, text: "fix the bug" })).toBe(false);
   expect(composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/clear" })).toBe(false);
   expect(composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/side why?" })).toBe(true);
+  expect(composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/panel why?" })).toBe(
+    true,
+  );
+  expect(composerRunsDraftLocally({ ...all, text: "/panelists" })).toBe(false);
+});
+
+it("preserves inline attachments when moving the panel topic out of the draft", () => {
+  const attachment = "[plan.md](t3-context://v1/file/plan)";
+  expect(parsePanelComposerDraft(`/panel compare designs ${attachment}`)).toEqual({
+    topic: "compare designs",
+    retainedPrompt: attachment,
+  });
 });

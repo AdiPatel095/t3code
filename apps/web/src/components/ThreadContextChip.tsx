@@ -1,4 +1,5 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { sideThreadKindOf } from "@t3tools/client-runtime/side-thread";
 import type { ThreadContextRecord, ProjectId } from "@t3tools/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { MessagesSquareIcon, UsersRoundIcon } from "lucide-react";
@@ -67,7 +68,7 @@ export function ThreadContextChip(props: {
             data-markdown-copy={props.copyMarkdown}
             className="no-underline"
           >
-            {shell?.source.panel !== undefined ? (
+            {sideThreadKindOf(shell) === "panel" ? (
               <UsersRoundIcon />
             ) : project ? (
               <ProjectFavicon project={project} className="size-[1em] self-center" />

@@ -55,7 +55,8 @@ export type ComposerCommandItem =
   | {
       id: string;
       type: "slash-command";
-      command: ComposerSlashCommand;
+      command: ComposerSlashCommand | "panel";
+      disabled?: boolean;
       label: string;
       description: string;
     }
@@ -226,6 +227,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
     <CommandItem
       render={<div id={props.optionId} />}
       aria-selected={props.isActive}
+      aria-disabled={props.item.type === "slash-command" ? props.item.disabled : undefined}
       value={props.item.id}
       data-composer-item-id={props.item.id}
       active={props.isActive}
