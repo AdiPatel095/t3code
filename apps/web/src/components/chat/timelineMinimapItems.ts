@@ -23,6 +23,15 @@ export function deriveTimelineMinimapItems(
   const items: TimelineMinimapItem[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
+    if (row?.kind === "panel-speaker") {
+      items.push({
+        id: row.id,
+        rowIndex: index,
+        userText: row.speaker.name,
+        assistantText: resolveFinalAssistantTextForTurn(rows, index),
+      });
+      continue;
+    }
     if (row?.kind !== "message" || row.message.role !== "user") {
       continue;
     }
@@ -44,6 +53,7 @@ function resolveFinalAssistantTextForTurn(
   let finalAssistantText: string | null = null;
   for (let index = userRowIndex + 1; index < rows.length; index += 1) {
     const row = rows[index];
+    if (row?.kind === "panel-speaker") break;
     if (row?.kind !== "message") {
       continue;
     }

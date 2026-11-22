@@ -50,6 +50,7 @@ import {
   Files,
   Globe2,
   MessagesSquare,
+  UsersRound,
   Plus,
   TerminalSquare,
   Volume2Icon,
@@ -744,6 +745,8 @@ const SIDE_CHAT_STATE_LABELS = {
 /** What a side chat tab's dot shows and its title's accessible name says. */
 function sideChatTabState(shell: EnvironmentThreadShell | null) {
   if (shell === null) return null;
+  if (shell.source.panel !== undefined)
+    return shell.source.panel.status === "running" ? "running" : null;
   if (shell.hasPendingApprovals || shell.pendingSubagentRequest === "approval") {
     return "needs approval";
   }
@@ -759,7 +762,12 @@ function SideChatTabIcon(props: { environmentId: EnvironmentId | null; threadId:
     props.environmentId === null ? null : scopeThreadRef(props.environmentId, props.threadId),
   );
   const state = sideChatTabState(shell);
-  const Icon = shell !== null && shell.lineage.sideChat !== true ? Bot : MessagesSquare;
+  const Icon =
+    shell?.source.panel !== undefined
+      ? UsersRound
+      : shell !== null && shell.lineage.sideChat !== true
+        ? Bot
+        : MessagesSquare;
   return (
     <>
       <Icon className="size-3 shrink-0" />
@@ -1071,10 +1079,12 @@ function RightPanelTab(
                 aria-label={
                   sideChatState === null
                     ? undefined
-                    : gt("{title}, {state}", {
-                        title,
-                        state: messages(SIDE_CHAT_STATE_LABELS[sideChatState]),
-                      })
+                    : sideChatShell?.source.panel !== undefined
+                      ? gt("{title}, running", { title })
+                      : gt("{title}, {state}", {
+                          title,
+                          state: messages(SIDE_CHAT_STATE_LABELS[sideChatState]),
+                        })
                 }
                 onClick={() => onActivate(surface)}
               >

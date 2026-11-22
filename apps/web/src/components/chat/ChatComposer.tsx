@@ -1,3 +1,9 @@
+import { panelSendTooltip } from "@t3tools/client-runtime/panel-chat";
+import { PANEL_TEXT_MAX_CHARS } from "@t3tools/shared/panelChat";
+import type { OrchestrationV2PanelState } from "@t3tools/contracts";
+import { ArrowUpIcon } from "lucide-react";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { usePostToPanel } from "./useComposerSend";
 import { copySnapshot } from "./copySnapshot";
 import { VoiceInputSetup } from "./VoiceInputSetup";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
@@ -117,7 +123,7 @@ import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../../threa
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
 import { useComposerTriggerState } from "./useComposerTriggerState";
-import { useComposerMenuItems } from "./useComposerMenuItems";
+import { useComposerMenuItems, usePanelComposerMenuItems } from "./useComposerMenuItems";
 import { useComposerMultilinePrompt } from "./useComposerMultilinePrompt";
 import {
   reconcileAttachmentContextReferences,
@@ -170,6 +176,7 @@ import {
 } from "../ComposerPromptEditorTiptap";
 import {
   ComposerContextActionsContext,
+  EMPTY_COMPOSER_CONTEXT_RECORDS,
   composerContextRecordsFromDraft,
 } from "../composerContextPresentation";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
@@ -4114,3 +4121,192 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     </form>
   );
 });
+
+export function PanelComposer({
+  panel,
+  threadRef,
+  title,
+  editorRef,
+  settings,
+  keybindings,
+  getShortcutContext,
+  resolvedTheme,
+  onPageScrollKeyDown,
+  onPageScrollKeyUp,
+  onPageScrollRelease,
+}: {
+  panel: OrchestrationV2PanelState;
+  threadRef: ScopedThreadRef;
+  title: string;
+  editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
+  settings: Pick<ChatComposerProps["settings"], "sendShortcut">;
+  keybindings: ChatComposerProps["keybindings"];
+  getShortcutContext: ChatComposerProps["getShortcutContext"];
+  resolvedTheme: "light" | "dark";
+  onPageScrollKeyDown: ChatComposerProps["onPageScrollKeyDown"];
+  onPageScrollKeyUp: ChatComposerProps["onPageScrollKeyUp"];
+  onPageScrollRelease: ChatComposerProps["onPageScrollRelease"];
+}) {
+  const gt = useGT();
+  const messages = useMessages();
+  const listId = useId();
+  const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
+  const { prompt } = useComposerThreadDraft(threadRef);
+  const [cursor, setCursor] = useState(prompt.length);
+  const [trigger, setTrigger] = useState<ComposerTrigger | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<HTMLDivElement | null>(null);
+  const items = usePanelComposerMenuItems(panel, trigger);
+  const activeIndex = Math.max(
+    0,
+    items.findIndex((item) => item.id === highlightedId),
+  );
+  const activeItem = items[activeIndex];
+  const post = usePostToPanel(threadRef);
+  const text = prompt.trim();
+  const tooLong = text.length > PANEL_TEXT_MAX_CHARS;
+  const canSend = text.length > 0 && !tooLong;
+  const sendTooltip = panelSendTooltip(text, panel, messages);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the editor once its DOM is mounted
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => editorRef.current?.focusAtEnd());
+    return () => window.cancelAnimationFrame(frame);
+  }, [editorRef]);
+
+  function submit() {
+    if (!canSend) return;
+    setTrigger(null);
+    setHighlightedId(null);
+    void post(prompt);
+  }
+
+  function selectParticipant(item: ComposerCommandItem) {
+    if (item.type !== "panel-participant" || trigger?.kind !== "path") return;
+    const replacement = `@${item.participant.handle} `;
+    const end = extendReplacementRangeForTrailingSpace(prompt, trigger.rangeEnd, replacement);
+    const next = replaceTextRange(prompt, trigger.rangeStart, end, replacement);
+    useComposerDraftStore.getState().setPrompt(threadRef, next.text);
+    setCursor(next.cursor);
+    setTrigger(null);
+    setHighlightedId(null);
+  }
+
+  function onCommandKeyDown(key: string, event: KeyboardEvent) {
+    if (event.isComposing || event.keyCode === 229) return false;
+    if (activeItem) {
+      if (key === "Escape") {
+        setTrigger(null);
+        return true;
+      }
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        const offset = key === "ArrowDown" ? 1 : -1;
+        setHighlightedId(items[(activeIndex + offset + items.length) % items.length]?.id ?? null);
+        return true;
+      }
+      if (
+        (key === "Enter" || key === "Tab") &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        selectParticipant(activeItem);
+        return true;
+      }
+    }
+    const intent = composerSubmissionIntentForKey({
+      event,
+      keybindings,
+      context: getShortcutContext(event.target),
+      isSoftwareKeyboardOpen,
+      isDraftThread: false,
+      sendShortcut: settings.sendShortcut,
+      prompt,
+    });
+    if (intent !== "foreground") return false;
+    submit();
+    return true;
+  }
+
+  return (
+    <form
+      data-chat-composer-form="true"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}
+    >
+      <ComposerSurface.Main>
+        <div ref={setMenuAnchor} className="flex min-w-0 items-end gap-1 px-3 py-2">
+          {activeItem ? (
+            <ComposerCommandMenuLayer anchor={menuAnchor}>
+              <ComposerCommandMenu
+                listId={listId}
+                items={items}
+                resolvedTheme={resolvedTheme}
+                isLoading={false}
+                triggerKind="path"
+                activeItemId={activeItem.id}
+                onHighlightedItemChange={setHighlightedId}
+                onSelect={selectParticipant}
+              />
+            </ComposerCommandMenuLayer>
+          ) : null}
+          <div className="min-w-0 flex-1 py-1">
+            <ComposerPromptEditor
+              draftKey={scopedThreadKey(threadRef)}
+              editorRef={editorRef}
+              ariaLabel={gt("Message {title}", { title })}
+              literalText
+              disabled={false}
+              placeholder={gt("Message the panel, @ to address a model")}
+              value={prompt}
+              cursor={Math.min(cursor, prompt.length)}
+              contextRecords={EMPTY_COMPOSER_CONTEXT_RECORDS}
+              skills={NO_PROVIDER_SKILLS}
+              suggestionListId={listId}
+              activeSuggestionId={
+                activeItem ? composerSuggestionOptionId(listId, activeItem.id) : undefined
+              }
+              onChange={(value, nextCursor) => {
+                useComposerDraftStore.getState().setPrompt(threadRef, value);
+                setCursor(nextCursor);
+                const next = detectComposerTrigger(value, nextCursor);
+                setTrigger(next?.kind === "path" ? next : null);
+                if (next?.query !== trigger?.query) setHighlightedId(null);
+              }}
+              onCommandKeyDown={onCommandKeyDown}
+              onPageScrollKeyDown={onPageScrollKeyDown}
+              onPageScrollKeyUp={onPageScrollKeyUp}
+              onPageScrollRelease={onPageScrollRelease}
+              onPaste={(event) => {
+                if (event.clipboardData.files.length > 0) event.preventDefault();
+              }}
+            />
+          </div>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="inline-flex">
+                  <Button
+                    type="submit"
+                    size="icon-sm-pill"
+                    aria-label={gt("Send message")}
+                    disabled={!canSend}
+                  >
+                    <ArrowUpIcon />
+                  </Button>
+                </span>
+              }
+            />
+            <TooltipPopup>{sendTooltip}</TooltipPopup>
+          </Tooltip>
+        </div>
+        <ComposerPromptLengthValidation
+          message={tooLong ? gt("Keep panel messages under 8,000 characters.") : null}
+        />
+      </ComposerSurface.Main>
+    </form>
+  );
+}

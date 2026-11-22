@@ -1,3 +1,4 @@
+import type { panelParticipantMenuItems } from "@t3tools/client-runtime/panel-chat";
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import type { ComposerPathSearchTarget } from "@t3tools/client-runtime/state/threads";
 import {
@@ -18,6 +19,8 @@ import {
 import {
   BlocksIcon,
   FolderIcon,
+  FileSearchIcon,
+  UsersRoundIcon,
   MessagesSquareIcon,
   PackageIcon,
   SettingsIcon,
@@ -39,6 +42,7 @@ import { ComposerBanner } from "./ComposerBanner";
 import { resolvePullRequestState } from "../pullRequest/pullRequestPresentation";
 
 export type ComposerCommandItem =
+  | ReturnType<typeof panelParticipantMenuItems>[number]
   | {
       id: string;
       type: "path";
@@ -84,6 +88,7 @@ export type ComposerCommandItem =
       thread: ScopedThreadRef;
       label: string;
       description: string;
+      panel?: true;
     }
   | {
       id: string;
@@ -242,7 +247,23 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
         />
       ) : null}
       {props.item.type === "thread" ? (
-        <MessagesSquareIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+        props.item.panel ? (
+          <UsersRoundIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+        ) : (
+          <MessagesSquareIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+        )
+      ) : null}
+      {props.item.type === "panel-participant" ? (
+        props.item.participant.role === "code_agent" ? (
+          <FileSearchIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+        ) : (
+          <ProviderInstanceIcon
+            driverKind={props.item.participant.driver}
+            displayName={props.item.participant.name}
+            className="size-4 shrink-0"
+            iconClassName="size-4"
+          />
+        )
       ) : null}
       {props.item.type === "environment" ? (
         <EnvironmentMachineIcon

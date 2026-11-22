@@ -15,12 +15,15 @@ import type { MFunctionType } from "gt-i18n/types";
 const COMPOSER_THREAD_RESULT_LIMIT = 5;
 
 export type ComposerThreadCandidate = ThreadSearchShell &
-  Pick<EnvironmentThreadShell, "archivedAt" | "lineage">;
+  Pick<EnvironmentThreadShell, "archivedAt" | "lineage"> & {
+    readonly source?: Pick<EnvironmentThreadShell["source"], "panel">;
+  };
 
 export interface ComposerThreadItem {
   readonly id: string;
   readonly type: "thread";
   readonly thread: ScopedThreadRef;
+  readonly panel?: true;
   readonly label: string;
   readonly description: string;
 }
@@ -77,8 +80,11 @@ export function matchComposerThreadItems(
         type: "thread",
         thread: { environmentId: shell.environmentId, threadId: shell.id },
         label: shell.title,
+        ...(shell.source?.panel === undefined ? {} : { panel: true as const }),
         description: isOwnSideChat(shell)
-          ? resolve(msg("Side chat"))
+          ? shell.source?.panel === undefined
+            ? resolve(msg("Side chat"))
+            : resolve(msg("Panel chat"))
           : machine === undefined
             ? resolve(msg("Thread", { $context: "noun, search result type" }))
             : resolve(msg("Thread on {machine}", { machine })),

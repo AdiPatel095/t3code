@@ -33,6 +33,7 @@ import ChatView from "../ChatView";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { PanelAddToChat, PanelDeleteButton, PanelRoster } from "./PanelThreadPane";
 import { BackgroundThreadContext } from "./backgroundThread";
 
 /**
@@ -75,9 +76,12 @@ export default function SideThreadPane(props: {
   });
   const projection = useQuietThreadProjection(threadRef)?.projection;
   const thread = shell ?? projection?.thread ?? null;
-  // A tab opens for side chats and subagents only, so an unloaded one is still one of them.
-  const kind = sideThreadKindOf(thread) ?? "subagent";
+  const kind = sideThreadKindOf(shell?.source ?? projection?.thread);
+  const [knownPanelId, setKnownPanelId] = useState<ScopedThreadRef["threadId"] | null>(null);
+  if (kind === "panel" && knownPanelId !== threadId) setKnownPanelId(threadId);
   const isSideChat = kind === "side-chat";
+  const isPanel = kind === "panel" || knownPanelId === threadId;
+  const panel = projection?.thread?.panel;
   const canOperate = useEnvironmentScope(parentRef.environmentId, AuthOrchestrationOperateScope);
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const confirmThreadDelete = useClientSettings((settings) => settings.confirmThreadDelete);
@@ -131,10 +135,12 @@ export default function SideThreadPane(props: {
 
   const title =
     thread === null
-      ? isSideChat
-        ? gt("Side chat")
-        : gt("Subagent")
-      : isSideChat
+      ? isPanel
+        ? gt("Panel chat")
+        : isSideChat
+          ? gt("Side chat")
+          : gt("Subagent")
+      : isSideChat || isPanel
         ? thread.title
         : formatSubagentDisplayTitle(thread.title);
 
@@ -144,41 +150,64 @@ export default function SideThreadPane(props: {
       data-testid="side-thread-pane"
       className="flex h-full min-h-0 flex-col"
     >
-      {isSideChat ? (
+      {isSideChat || isPanel ? (
         <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border pr-1 pl-3">
           <h2 className="min-w-0 flex-1 truncate text-xs font-medium">{title}</h2>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  aria-disabled={!canAddToChat || undefined}
-                  onClick={addToChat}
-                >
-                  <T>Add to chat</T>
-                </Button>
-              }
+          {isPanel && panel ? <PanelRoster panel={panel} /> : null}
+          {isPanel ? (
+            renderState === "missing" ? null : (
+              <PanelAddToChat
+                parentRef={scopeThreadRef(
+                  parentRef.environmentId,
+                  thread?.lineage.parentThreadId ?? parentRef.threadId,
+                )}
+                panelRef={threadRef}
+                title={title}
+              />
+            )
+          ) : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    aria-disabled={!canAddToChat || undefined}
+                    onClick={addToChat}
+                  >
+                    <T>Add to chat</T>
+                  </Button>
+                }
+              />
+              <TooltipPopup side="bottom">
+                {canAddToChat
+                  ? gt("Adds this side chat to the main thread's next message.")
+                  : gt("Available after the first message.")}
+              </TooltipPopup>
+            </Tooltip>
+          )}
+          {isPanel ? (
+            <PanelDeleteButton
+              panelRef={threadRef}
+              title={title}
+              canOperate={canOperate && renderState !== "missing" && thread !== null}
+              onDeleted={props.onClose}
             />
-            <TooltipPopup side="bottom">
-              {canAddToChat
-                ? gt("Adds this side chat to the main thread's next message.")
-                : gt("Available after the first message.")}
-            </TooltipPopup>
-          </Tooltip>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={gt("Delete side chat")}
+              disabled={!canOperate || shell === null || deleting}
+              onClick={() => void deleteSideChat()}
+            >
+              <Trash2Icon />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label={gt("Delete side chat")}
-            disabled={!canOperate || shell === null || deleting}
-            onClick={() => void deleteSideChat()}
-          >
-            <Trash2Icon />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            aria-label={gt("Close side chat")}
+            aria-label={isPanel ? gt("Close panel chat") : gt("Close side chat")}
             onClick={props.onClose}
           >
             <XIcon />
@@ -187,7 +216,9 @@ export default function SideThreadPane(props: {
       ) : null}
       {renderState === "missing" ? (
         <p className="p-3 text-xs text-muted-foreground">
-          {isSideChat ? (
+          {isPanel ? (
+            <T>This panel chat was deleted.</T>
+          ) : isSideChat ? (
             <T>This side chat was deleted.</T>
           ) : (
             <T>This thread is no longer available.</T>

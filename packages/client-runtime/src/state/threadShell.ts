@@ -141,7 +141,12 @@ const rolledUpRequest = (
 /** A side chat asks its user directly, so questions roll up to the parent as well as approvals. */
 function sideChatRequest(thread: OrchestrationV2ThreadShell): PendingSubagentRequest | null {
   const kind = thread.pendingRuntimeRequest?.kind;
-  if (kind === undefined || kind === "auth_refresh" || thread.lineage.sideChat !== true) {
+  if (
+    kind === undefined ||
+    kind === "auth_refresh" ||
+    thread.lineage.sideChat !== true ||
+    thread.panel !== undefined
+  ) {
     return null;
   }
   return kind === "user_input" ? "user_input" : "approval";
@@ -316,20 +321,30 @@ export function createEnvironmentThreadShellAtoms(input: {
 
   // Side chats by parent, built once per change for every parent's row. Without side chats
   // it stays the same empty map, so those rows do no work.
-  const environmentSideChatsByParentAtom = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => {
-      let byParent: Map<ThreadId, OrchestrationV2ThreadShell[]> | undefined;
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
-        const parentId = thread.lineage.parentThreadId;
-        if (thread.lineage.sideChat !== true || parentId === null) continue;
-        byParent ??= new Map();
-        const siblings = byParent.get(parentId);
-        if (siblings) siblings.push(thread);
-        else byParent.set(parentId, [thread]);
-      }
-      return byParent ?? EMPTY_SIDE_CHATS_BY_PARENT;
-    }).pipe(Atom.withLabel(`environment-side-chats-by-parent:${environmentId}`)),
-  );
+  const sideThreadsByParent = (panel: boolean) =>
+    Atom.family((environmentId: EnvironmentId) =>
+      Atom.make((get) => {
+        let byParent: Map<ThreadId, OrchestrationV2ThreadShell[]> | undefined;
+        for (const thread of get(environmentThreadsAtom(environmentId))) {
+          const parentId = thread.lineage.parentThreadId;
+          if (
+            thread.lineage.sideChat !== true ||
+            parentId === null ||
+            (thread.panel !== undefined) !== panel
+          )
+            continue;
+          byParent ??= new Map();
+          const siblings = byParent.get(parentId);
+          if (siblings) siblings.push(thread);
+          else byParent.set(parentId, [thread]);
+        }
+        return byParent ?? EMPTY_SIDE_CHATS_BY_PARENT;
+      }).pipe(
+        Atom.withLabel(`environment-${panel ? "panels" : "side-chats"}-by-parent:${environmentId}`),
+      ),
+    );
+  const environmentSideChatsByParentAtom = sideThreadsByParent(false);
+  const environmentPanelsByParentAtom = sideThreadsByParent(true);
 
   // What an environment's own subagents ask. Kept apart from the tasks other
   // environments run for it, so two environments delegating to each other
@@ -596,6 +611,37 @@ export function createEnvironmentThreadShellAtoms(input: {
     }).pipe(Atom.withLabel(`environment-side-chats:${key}`));
   });
 
+  const panelChatsAtomFamily = Atom.family((key: string) => {
+    const ref = parseThreadKey(key);
+    let previous = EMPTY_THREAD_SHELLS;
+    return Atom.make((get) => {
+      const panels = get(environmentPanelsByParentAtom(ref.environmentId)).get(ref.threadId);
+      if (panels === undefined) {
+        previous = EMPTY_THREAD_SHELLS;
+        return previous;
+      }
+      const next = panels.map((thread) =>
+        scopedThread(ref.environmentId, thread, EMPTY_SUBAGENT_REQUESTS),
+      );
+      if (
+        previous.length === next.length &&
+        previous.every((thread, index) => {
+          const candidate = next[index];
+          return (
+            thread.id === candidate?.id &&
+            thread.title === candidate.title &&
+            thread.archivedAt === candidate.archivedAt &&
+            thread.source.panel?.status === candidate.source.panel?.status &&
+            thread.source.panel?.idleReason === candidate.source.panel?.idleReason
+          );
+        })
+      )
+        return previous;
+      previous = next;
+      return next;
+    }).pipe(Atom.withLabel(`environment-panel-chats:${key}`));
+  });
+
   const threadShellsForProjectRefsAtomFamily = Atom.family((key: string) => {
     const projectRefs = parseProjectRefCollectionKey(key);
     let previous: ReadonlyArray<EnvironmentThreadShell> = [];
@@ -799,5 +845,6 @@ export function createEnvironmentThreadShellAtoms(input: {
     quietThreadShellAtom: (ref: ScopedThreadRef) => quietThreadShellAtomFamily(threadKey(ref)),
     childThreadInputsAtom: (ref: ScopedThreadRef) => childThreadInputsAtomFamily(threadKey(ref)),
     sideChatsAtom: (ref: ScopedThreadRef) => sideChatsAtomFamily(threadKey(ref)),
+    panelChatsAtom: (ref: ScopedThreadRef) => panelChatsAtomFamily(threadKey(ref)),
   };
 }

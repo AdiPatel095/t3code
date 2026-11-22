@@ -1,4 +1,6 @@
-import { msg } from "gt-react";
+import { msg, useGT } from "gt-react";
+import { PANEL_TEXT_MAX_CHARS } from "@t3tools/shared/panelChat";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
@@ -300,6 +302,42 @@ interface ComposerSendInput {
  * thread, a feedback upload, and resuming an interrupted run. Each path restores the draft
  * when it fails.
  */
+export function usePostToPanel(threadRef: ScopedThreadRef) {
+  const gt = useGT();
+  const post = useAtomCommand(threadEnvironment.postToPanel, { reportFailure: false });
+  const inFlight = useRef(false);
+
+  return async (draft: string) => {
+    const { environmentId, threadId } = threadRef;
+    const text = draft.trim();
+    if (
+      inFlight.current ||
+      text.length === 0 ||
+      text.length > PANEL_TEXT_MAX_CHARS ||
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
+      return;
+
+    inFlight.current = true;
+    const result = await post({
+      environmentId,
+      input: { threadId, messageId: newMessageId(), text },
+    });
+    inFlight.current = false;
+    if (result._tag === "Success") {
+      const store = useComposerDraftStore.getState();
+      if (store.getComposerDraft(threadRef)?.prompt === draft) store.setPrompt(threadRef, "");
+    } else if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title: gt("Could not send to the panel"),
+        ...(error instanceof Error ? { description: error.message } : {}),
+      });
+    }
+  };
+}
+
 export function useComposerSend(input: ComposerSendInput) {
   const {
     environmentId,

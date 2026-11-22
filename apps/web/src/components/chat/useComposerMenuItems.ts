@@ -1,3 +1,5 @@
+import { panelParticipantMenuItems } from "@t3tools/client-runtime/panel-chat";
+import type { OrchestrationV2PanelState } from "@t3tools/contracts";
 import { useGT, useMessages } from "gt-react";
 import {
   legacyThreadPullRequestKey,
@@ -61,6 +63,14 @@ const COMPOSER_PULL_REQUEST_LIST_LIMIT = 99;
 const COMPOSER_PULL_REQUEST_RESULT_LIMIT = 12;
 const EMPTY_PULL_REQUEST_LIST_TARGETS: ReadonlyArray<EnvironmentQueryTarget<PullRequestListInput>> =
   [];
+
+export function usePanelComposerMenuItems(
+  panel: OrchestrationV2PanelState,
+  trigger: ComposerTrigger | null,
+) {
+  const messages = useMessages();
+  return trigger?.kind === "path" ? panelParticipantMenuItems(panel, trigger.query, messages) : [];
+}
 
 /** Builds the @, /, $ and # suggestion lists, running the searches each trigger needs. */
 export function useComposerMenuItems({
