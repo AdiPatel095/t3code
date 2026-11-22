@@ -158,7 +158,7 @@ function PanelSlotRow(props: {
           lockedProvider={null}
           instanceEntries={props.providers}
           modelOptionsByInstance={props.models}
-          triggerClassName="w-full max-w-none sm:max-w-none"
+          triggerClassName="w-full max-w-none justify-start text-left sm:max-w-none"
           {...(!model ? { triggerLabel: selection?.model ?? gt("Choose model") } : {})}
           triggerDetail={effort.detail}
           triggerSuffix={
