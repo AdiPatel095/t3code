@@ -12505,7 +12505,7 @@
   "6c38bccabdc0df2e": "{name} 无法回复",
   "6e08bd6217536205": "{name} 已达到用量上限",
   "574ffd449965bf9a": "{name} 暂不可用",
-  "5567fc23677d70f2": "{name} 在 {minutes, plural, other {{minutes} 分钟}}后被停止",
+  "18e9ede42977627c": "{name} 在 {minutes, plural, other {{minutes} 分钟}}后被停止",
   "18f066b35134f98d": "由你提问",
   "307153eec1d7c3e3": "由 {name} 提问",
   "41be6f8845802bf6": "未调用代码智能体",

@@ -171,10 +171,10 @@ function outcomeLine(
           : PANEL_PANELIST_REPLY_LIMIT_MS) / 60_000;
       return {
         label: resolve(
-          msg("{name} was stopped after {minutes, plural, one {# minute} other {# minutes}}", {
-            name,
-            minutes,
-          }),
+          msg(
+            "{name} was stopped after {minutes, plural, one {{minutes} minute} other {{minutes} minutes}}",
+            { name, minutes },
+          ),
         ),
       };
     }
