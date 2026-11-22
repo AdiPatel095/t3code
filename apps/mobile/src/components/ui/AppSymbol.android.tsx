@@ -137,6 +137,8 @@ import IconUserX from "@tabler/icons-react-native/IconUserX";
 import IconUserQuestion from "@tabler/icons-react-native/IconUserQuestion";
 import IconUserPlus from "@tabler/icons-react-native/IconUserPlus";
 import IconUsers from "@tabler/icons-react-native/IconUsers";
+import IconUsersGroup from "@tabler/icons-react-native/IconUsersGroup";
+import IconFileSearch from "@tabler/icons-react-native/IconFileSearch";
 import IconWifi from "@tabler/icons-react-native/IconWifi";
 import IconWifiOff from "@tabler/icons-react-native/IconWifiOff";
 import IconWorld from "@tabler/icons-react-native/IconWorld";
@@ -245,6 +247,8 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   pencil: IconPencil,
   "person.crop.circle": IconUserCircle,
   "person.2": IconUsers,
+  "person.3": IconUsersGroup,
+  "doc.text.magnifyingglass": IconFileSearch,
   "person.fill.checkmark": IconUserCheck,
   "person.fill.xmark": IconUserX,
   "person.badge.clock": IconUserQuestion,

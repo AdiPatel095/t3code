@@ -240,6 +240,10 @@ export function useSideChats(ref: ScopedThreadRef) {
   return useAtomValue(environmentThreadShells.sideChatsAtom(ref));
 }
 
+export function usePanelChats(ref: ScopedThreadRef) {
+  return useAtomValue(environmentThreadShells.panelChatsAtom(ref));
+}
+
 const NO_LINKED_ENVIRONMENTS: ReadonlyMap<EnvironmentId, string> = new Map();
 
 /** `linked` names the machines `environmentId` links to, whose threads open read-only. */

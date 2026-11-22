@@ -14,9 +14,12 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2RunAttempt,
+  type OrchestrationV2PanelParticipant,
+  type OrchestrationV2PanelTurn,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { panelTimelineAnnotations } from "@t3tools/client-runtime/panel-chat";
 import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
@@ -28,6 +31,7 @@ import {
   workEntryRowLabel,
   threadFeedCompactionLabels,
   createThreadFeedCache,
+  derivePanelThreadFeed,
   deriveThreadFeedPresentation,
   messageFoldRunId,
   type ThreadFeedCache,
@@ -451,6 +455,206 @@ function assistantMessage(updatedAt = "2026-06-20T00:00:03.000Z") {
     streaming: false,
   };
 }
+
+describe("panel thread feed", () => {
+  const panelist: OrchestrationV2PanelParticipant = {
+    id: "panelist",
+    role: "panelist",
+    handle: "model",
+    name: "Model",
+    driver: ProviderDriverKind.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+    toolsRemoved: true,
+  };
+  const codeAgent: OrchestrationV2PanelParticipant = {
+    ...panelist,
+    id: "code",
+    handle: "code",
+    name: "Lookup model",
+    role: "code_agent",
+  };
+  const secondPanelist: OrchestrationV2PanelParticipant = {
+    ...panelist,
+    id: "other",
+    handle: "other",
+    name: "Other model",
+  };
+  const panel = { participants: [panelist, secondPanelist, codeAgent] };
+  const marker = (id: RunId, index: number, participantId = panelist.id) =>
+    projected(
+      {
+        ...userMessage(),
+        id: TurnItemId.make(`marker:${id}`),
+        messageId: MessageId.make(`marker:${id}`),
+        runId: id,
+        text: "",
+        panelParticipantId: participantId,
+        freshContext: true,
+      },
+      index,
+    );
+  const panelRun = (
+    id: RunId,
+    ordinal: number,
+    overrides: Partial<OrchestrationV2PanelTurn> = {},
+  ) => ({
+    id,
+    ordinal,
+    requestedAt: DateTime.makeUnsafe("2026-06-20T00:00:01.000Z"),
+    panelTurn: {
+      participantId: panelist.id,
+      kind: "reply" as const,
+      round: 1,
+      totalRounds: 2,
+      ...overrides,
+    },
+  });
+  const display = { panel: true, toolCallVisibility: "showAll" as const, revealedMessageId: null };
+
+  it("puts the speaker ahead of live work and preserves the streaming reply as the marker stays hidden", () => {
+    const topic = projected({ ...userMessage(), runId: null }, 0);
+    const turnMarker = marker(runId, 1);
+    const draft = { ...assistantMessage(), text: "First words", streaming: true };
+    const latestRun = {
+      runId,
+      status: "running" as const,
+      startedAt: "2026-06-20T00:00:01.000Z",
+      completedAt: null,
+    };
+    const annotations = panelTimelineAnnotations([panelRun(runId, 1)], panel);
+    const cache = createThreadFeedCache();
+    const rows = (items: OrchestrationV2ProjectedTurnItem[]) =>
+      derivePanelThreadFeed(
+        deriveThreadFeedPresentation(
+          buildThreadFeed(items, { cache }),
+          latestRun,
+          new Set(),
+          new Set(),
+          latestRun.startedAt,
+          false,
+          cache,
+          display,
+        ),
+        annotations,
+      );
+
+    expect(rows([topic, turnMarker]).map((row) => row.type)).toEqual([
+      "message",
+      "panel-divider",
+      "panel-speaker",
+      "run-fold",
+      "thinking",
+    ]);
+    const streaming = rows([topic, turnMarker, projected(draft, 2)]);
+    expect(streaming.map((row) => row.id)).not.toContain(turnMarker.item.id);
+    expect(streaming.findIndex((row) => row.type === "panel-speaker")).toBeLessThan(
+      streaming.findIndex((row) => row.id === draft.messageId),
+    );
+    expect(streaming.find((row) => row.id === draft.messageId)).toMatchObject({
+      message: { text: "First words", streaming: true },
+    });
+    expect(deriveThreadFeedPresentation(buildThreadFeed([turnMarker]), null, new Set())).toEqual(
+      [],
+    );
+  });
+
+  it("orders pass, failure, lookup limit, timeout, and conclusion around their turns", () => {
+    const failed = RunId.make("failed");
+    const asking = RunId.make("asking");
+    const lookup = RunId.make("lookup");
+    const conclusion = RunId.make("conclusion");
+    const reply = (id: RunId, index: number, text: string) =>
+      projected(
+        {
+          ...assistantMessage(),
+          id: TurnItemId.make(`reply:${id}`),
+          messageId: MessageId.make(`reply:${id}`),
+          runId: id,
+          text,
+        },
+        index,
+      );
+    const feed = buildThreadFeed([
+      marker(runId, 0),
+      reply(runId, 1, "PASS"),
+      marker(failed, 2, secondPanelist.id),
+      projected(
+        {
+          ...base("failure", "2026-06-20T00:00:02.000Z", 3),
+          runId: failed,
+          type: "error",
+          status: "failed",
+          failure: {
+            class: "provider_error",
+            message: "Provider failed",
+            code: null,
+            retryable: false,
+          },
+        },
+        3,
+      ),
+      marker(asking, 4),
+      reply(asking, 5, "Can we look this up?"),
+      marker(lookup, 6, codeAgent.id),
+      reply(lookup, 7, "Partial lookup"),
+      marker(conclusion, 8),
+      reply(conclusion, 9, "Conclusion reply"),
+    ]);
+    const annotations = panelTimelineAnnotations(
+      [
+        panelRun(runId, 1, { outcome: "passed" }),
+        panelRun(failed, 2, {
+          participantId: secondPanelist.id,
+          outcome: "failed",
+          outcomeDetail: "Provider failed",
+        }),
+        panelRun(asking, 3, { round: 2, outcome: "replied", lookup: "limit_reached" }),
+        panelRun(lookup, 4, {
+          participantId: codeAgent.id,
+          kind: "lookup",
+          round: 2,
+          askedBy: "user",
+          outcome: "timed_out",
+        }),
+        panelRun(conclusion, 5, { kind: "conclusion", outcome: "replied" }),
+      ],
+      panel,
+    );
+    const rows = derivePanelThreadFeed(
+      deriveThreadFeedPresentation(
+        feed,
+        null,
+        new Set(),
+        new Set(),
+        null,
+        false,
+        undefined,
+        display,
+      ),
+      annotations,
+    );
+    expect(
+      rows
+        .filter((row) => row.type !== "panel-speaker")
+        .map((row) => (row.type === "panel-divider" ? row.line : row.id)),
+    ).toEqual([
+      { label: "Round 1 of 2" },
+      { label: "Model passed" },
+      { label: "Other model could not reply", detail: "Provider failed", tone: "danger" },
+      { label: "Round 2 of 2" },
+      "reply:asking",
+      { label: "Code agent not called", detail: "2 lookups already used this round" },
+      "reply:lookup",
+      { label: "Lookup model was stopped after 5 minutes" },
+      { label: "Conclusion" },
+      "reply:conclusion",
+    ]);
+    expect(rows.find((row) => row.id === "panel-speaker:lookup")).toMatchObject({
+      speaker: codeAgent,
+      askedBy: "asked by you",
+    });
+  });
+});
 
 describe("buildThreadFeed", () => {
   it("keeps async answers in question history instead of user bubbles", () => {

@@ -3,6 +3,10 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { linkRequestTargetName } from "@t3tools/client-runtime/link-request";
+import type {
+  PanelTimelineAnnotation,
+  PanelTimelineLine,
+} from "@t3tools/client-runtime/panel-chat";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { turnHasChanges } from "@t3tools/client-runtime/state/thread-repositories";
@@ -218,6 +222,21 @@ export type ThreadFeedEntry = ThreadFeedEntryContent & {
 
 type ThreadFeedEntryContent =
   | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "sent-message" | "mcp-app" }>
+  | {
+      readonly type: "panel-speaker";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: RunId;
+      readonly speaker: PanelTimelineAnnotation["speaker"];
+      readonly askedBy?: string;
+    }
+  | {
+      readonly type: "panel-divider";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: RunId;
+      readonly line: PanelTimelineLine;
+    }
   | {
       readonly type: "activity-group";
       readonly id: string;
@@ -961,6 +980,11 @@ function singleToolCallLabel(
   return command ? truncate(command, WORK_LOG_LABEL_MAX_LENGTH) : activity.summary;
 }
 
+function isPanelMarker(entry: ThreadFeedEntry | RawThreadFeedEntry): boolean {
+  const item = entry.type === "message" ? entry.message.projectedItem?.item : undefined;
+  return item?.type === "user_message" && item.panelParticipantId !== undefined;
+}
+
 function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
   return (
     entry.type === "message" &&
@@ -1025,7 +1049,7 @@ function groupAdjacentActivities(
           continue;
       }
     }
-    if (isEmptyMessage(entry)) {
+    if (isEmptyMessage(entry) && !isPanelMarker(entry)) {
       continue;
     }
 
@@ -1539,6 +1563,7 @@ function presentationRestart(
     !latestRunsEqual(previous.latestRun, latestRun) ||
     previous.activeWorkStartedAt !== activeWorkStartedAt ||
     previous.runlessWorkActive !== runlessWorkActive ||
+    previous.display.panel !== display.panel ||
     previous.display.toolCallVisibility !== display.toolCallVisibility ||
     previous.display.revealedMessageId !== display.revealedMessageId ||
     !setsEqual(previous.expandedRunIds, expandedRunIds) ||
@@ -1691,6 +1716,7 @@ function liveAnswerPreview(feed: ReadonlyArray<ThreadFeedEntry>): string | null 
 }
 
 export interface ThreadFeedDisplay {
+  readonly panel?: boolean;
   readonly toolCallVisibility: ToolCallVisibility;
   readonly revealedMessageId: MessageId | null;
 }
@@ -1863,6 +1889,7 @@ export function deriveThreadFeedPresentation(
     if (isUserMessageEntry(entry)) {
       restarts.push({ entry: feedIndex, rowsLength: result.length });
     }
+    if (!display.panel && isPanelMarker(entry)) continue;
     const isActiveTailGroup =
       isWorking &&
       (activeRunId !== null || runlessWorkActive) &&
@@ -2053,6 +2080,85 @@ export function deriveThreadFeedPresentation(
     };
   }
   return result;
+}
+
+export function derivePanelThreadFeed(
+  rows: ReadonlyArray<ThreadFeedEntry>,
+  annotations: ReadonlyMap<RunId, PanelTimelineAnnotation>,
+  resolve: MessageResolver = m,
+): ThreadFeedEntry[] {
+  const result: Array<ThreadFeedEntry | ThreadFeedEntry[]> = [];
+  const groups = new Map<RunId, ThreadFeedEntry[]>();
+  for (const row of rows) {
+    const runId = feedEntryRunId(row);
+    const annotation = runId === null ? undefined : annotations.get(runId);
+    const marker = isPanelMarker(row);
+    if (runId === null || annotation === undefined) {
+      if (!marker) result.push(row);
+      continue;
+    }
+    let group = groups.get(runId);
+    if (!group) {
+      const { roundStart, conclusion, speaker, askedBy } = annotation;
+      const { createdAt } = row;
+      group = [];
+      groups.set(runId, group);
+      result.push(group);
+      if (roundStart || conclusion) {
+        group.push({
+          type: "panel-divider",
+          id: `panel-${conclusion ? "conclusion" : "round"}:${runId}`,
+          runId,
+          createdAt,
+          line: {
+            label: roundStart
+              ? resolve(msg("Round {round} of {total}", roundStart))
+              : resolve(msg("Conclusion")),
+          },
+        });
+      }
+      group.push({
+        type: "panel-speaker",
+        id: `panel-speaker:${runId}`,
+        runId,
+        createdAt,
+        speaker,
+        ...(askedBy === undefined ? {} : { askedBy }),
+      });
+    }
+    if (marker || annotation.passed) continue;
+    if (
+      row.type === "activity-group" &&
+      row.activities.every(
+        ({ projectedItem: { item } }) =>
+          item.type === "approval_request" ||
+          item.type === "user_input_request" ||
+          (annotation.outcomeLine !== undefined &&
+            (item.type === "run_interrupt_result" ||
+              (item.type === "error" && item.parentItemId === null))),
+      )
+    ) {
+      continue;
+    }
+    group.push(row);
+  }
+  for (const [runId, group] of groups) {
+    const annotation = annotations.get(runId);
+    for (const [kind, line] of [
+      ["outcome", annotation?.outcomeLine],
+      ["lookup", annotation?.lookupLine],
+    ] as const) {
+      if (line === undefined) continue;
+      group.push({
+        type: "panel-divider",
+        id: `panel-${kind}:${runId}`,
+        runId,
+        createdAt: group.at(-1)!.createdAt,
+        line,
+      });
+    }
+  }
+  return result.flat();
 }
 
 const continuedWorkLogRows = new WeakMap<ThreadFeedEntry, ThreadFeedEntry>();

@@ -1055,6 +1055,7 @@ function ThreadRouteContent(
           canOperateThread={canOperateThread}
           selectedThread={selectedThreadWithDraftSettings ?? selectedThread}
           selectedThreadDetailRef={selectedThreadDetailRef}
+          panelProjection={selectedThreadDetail?.thread.panel ? selectedThreadDetail : undefined}
           contentPresentation={contentPresentation}
           screenTone={connectionTone(
             routeConnectionState,
