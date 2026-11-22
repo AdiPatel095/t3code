@@ -135,6 +135,7 @@ const layerTest = Layer.mergeAll(
     }),
   ),
   Layer.provide(ProviderTurnStartServiceTestkit.layer),
+  Layer.provide(ProviderTurnStartServiceTestkit.layerProviderRegistry),
   Layer.provide(
     Layer.succeed(ProjectEnrichmentService.ProjectEnrichmentService, {
       peek: () =>

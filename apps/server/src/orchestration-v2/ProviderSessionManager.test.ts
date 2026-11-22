@@ -1354,6 +1354,64 @@ it.effect(
     }),
 );
 
+it.effect("opens a panel session without a T3 MCP credential and revokes a stale credential", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const mcpConfigs = yield* Ref.make<
+      ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+    >([]);
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const threadId = ThreadId.make("thread-provider-session-manager-panel");
+      const now = yield* DateTime.now;
+      const event = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+      yield* eventSink.write({
+        events: [
+          {
+            ...event,
+            payload: {
+              ...event.payload,
+              panel: {
+                participants: [],
+                rounds: 1,
+                status: "idle",
+                idleReason: "stopped",
+                run: null,
+                queue: [],
+                current: null,
+                pendingPost: null,
+                cursor: null,
+                lookupsThisRound: 0,
+                turnCount: 0,
+              },
+            },
+          },
+        ],
+      });
+      const { config } = yield* registry.issue({
+        threadId,
+        providerInstanceId: modelSelection.instanceId,
+        browserToolsAvailable: false,
+        capabilities: new Set(["orchestration"]),
+      });
+      const token = config.authorizationHeader.replace(/^Bearer\s+/, "");
+      yield* mcpSessions.set(config);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      assert.deepEqual(yield* Ref.get(mcpConfigs), [undefined]);
+      assert.isUndefined(yield* mcpSessions.read(threadId));
+      assert.isUndefined(yield* registry.resolve(token));
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 cleans up an open interrupted mid-handshake", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

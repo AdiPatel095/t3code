@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as PanelChatService from "./panel/PanelChatService.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
@@ -335,6 +336,7 @@ function makeHarness(options: HarnessOptions = {}) {
   );
   return {
     layer: Layer.mergeAll(
+      Layer.mock(PanelChatService.PanelChatService)({}),
       layerLaunch,
       layerRegistry,
       layerThreadManagement,

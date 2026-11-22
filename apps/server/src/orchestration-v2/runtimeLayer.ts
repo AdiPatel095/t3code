@@ -183,8 +183,10 @@ const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pip
     Layer.mergeAll(
       layerContextHandoffServiceProvided,
       layerEventSink,
+      layerEventStoreProvided,
       IdAllocator.layer,
       ProjectionStore.layer,
+      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
       layerProviderSessionManagerProvided,
       layerProviderAuthServiceProvided,
       layerRunExecutionServiceProvided,

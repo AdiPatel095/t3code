@@ -627,6 +627,10 @@ export interface ProjectionStoreV2Shape {
   readonly getShellSnapshot: (
     options?: ShellSnapshotOptions,
   ) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, ProjectionStoreV2Error>;
+  readonly listRunningPanelThreadIds: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionStoreV2Error
+  >;
   readonly listActiveSubagentThreadIds: () => Effect.Effect<
     ReadonlyArray<ThreadId>,
     ProjectionStoreV2Error
@@ -9516,6 +9520,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .withTransaction(readShellSnapshotRows(options))
         .pipe(Effect.mapError(shellSnapshotReadError), Effect.flatMap(decodeShellSnapshot));
 
+    const listRunningPanelThreadIds = Effect.fn("ProjectionStore.listRunningPanelThreadIds")(
+      function* () {
+        const rows = yield* sql<{ readonly thread_id: string }>`
+          SELECT thread_id
+          FROM orchestration_v2_projection_threads
+          WHERE json_extract(payload_json, '$.panel.status') = 'running'
+        `;
+        return rows.map((row) => ThreadId.make(row.thread_id));
+      },
+      Effect.mapError(shellSnapshotReadError),
+    );
+
     const listActiveSubagentThreadIds = Effect.fn("ProjectionStore.listActiveSubagentThreadIds")(
       function* () {
         const rows = yield* sql<{ readonly thread_id: string }>`
@@ -9894,6 +9910,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getAgentAwarenessSnapshot: readOnReader(getAgentAwarenessSnapshot),
       getShellSnapshot: readOnReader(getShellSnapshot),
       getPullRequestSnapshot: readOnReader(getPullRequestSnapshot),
+      listRunningPanelThreadIds: readOnReader(listRunningPanelThreadIds),
       listActiveSubagentThreadIds: readOnReader(listActiveSubagentThreadIds),
       countThreads: readOnReader(countThreads),
       listActiveShellIndex: readOnReader(listActiveShellIndex),

@@ -8,8 +8,10 @@ import {
   isListedThreadLineage,
   MessageId,
   type OrchestrationV2Command,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   ProjectId,
@@ -18,6 +20,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   type RunId,
+  RuntimeRequestId,
   type ServerProvider,
   ThreadId,
   TurnItemId,
@@ -25,7 +28,12 @@ import {
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
-import { PANEL_MAX_PANELISTS, PANEL_TEXT_MAX_CHARS } from "@t3tools/shared/panelChat";
+import {
+  PANEL_CODE_AGENT_REPLY_LIMIT_MS,
+  PANEL_MAX_PANELISTS,
+  PANEL_PANELIST_REPLY_LIMIT_MS,
+  PANEL_TEXT_MAX_CHARS,
+} from "@t3tools/shared/panelChat";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -55,6 +63,7 @@ import * as ThreadMessageIntake from "../ThreadMessageIntake.ts";
 import { userFacingDispatchErrorMessage } from "../UserFacingErrors.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as PanelChat from "./PanelChatService.ts";
+import * as PanelTurnReactor from "./PanelTurnReactor.ts";
 
 const parentThreadId = ThreadId.make("thread:panel-parent");
 const panelThreadId = ThreadId.make("thread:panel");
@@ -128,13 +137,19 @@ const providerSnapshot = (
   skills: [],
 });
 
-type Reply = { readonly text: string } | { readonly failure: OrchestrationV2ProviderFailure };
+type Reply =
+  | { readonly text: string }
+  | { readonly failure: OrchestrationV2ProviderFailure }
+  | { readonly wait: true };
+
+type SeenTurns = Ref.Ref<ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnInput>>;
 
 function fakeAdapter(
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
   capabilities: OrchestrationV2ProviderCapabilities,
   reply: Ref.Ref<Reply>,
+  seenTurns: SeenTurns,
 ): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId,
@@ -146,6 +161,13 @@ function fakeAdapter(
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         let threadOrdinal = 0;
+        const held = new Map<
+          ProviderTurnId,
+          {
+            readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+            readonly providerTurn: OrchestrationV2ProviderTurn;
+          }
+        >();
         return {
           instanceId,
           driver,
@@ -187,6 +209,7 @@ function fakeAdapter(
           resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
           startTurn: (turn) =>
             Effect.gen(function* () {
+              yield* Ref.update(seenTurns, (turns) => [...turns, turn]);
               const response = yield* Ref.get(reply);
               const completedAt = yield* DateTime.now;
               const providerTurnId = ProviderTurnId.make(`provider-turn:${turn.attemptId}`);
@@ -195,25 +218,27 @@ function fakeAdapter(
                 providerThreadId: turn.providerThread.id,
                 providerTurnId,
               };
-              yield* Queue.offer(events, {
-                type: "provider_turn.updated",
-                driver,
-                providerTurn: {
-                  id: providerTurnId,
-                  providerThreadId: turn.providerThread.id,
-                  nodeId: turn.rootNodeId,
-                  runAttemptId: turn.attemptId,
-                  nativeTurnRef: {
-                    driver,
-                    nativeId: `native:${turn.attemptId}`,
-                    strength: "strong",
-                  },
-                  ordinal: turn.providerTurnOrdinal,
-                  status: "failure" in response ? "failed" : "completed",
-                  startedAt: now,
-                  completedAt,
+              const providerTurn: OrchestrationV2ProviderTurn = {
+                id: providerTurnId,
+                providerThreadId: turn.providerThread.id,
+                nodeId: turn.rootNodeId,
+                runAttemptId: turn.attemptId,
+                nativeTurnRef: {
+                  driver,
+                  nativeId: `native:${turn.attemptId}`,
+                  strength: "strong",
                 },
-              });
+                ordinal: turn.providerTurnOrdinal,
+                status:
+                  "wait" in response ? "running" : "failure" in response ? "failed" : "completed",
+                startedAt: now,
+                completedAt: "wait" in response ? null : completedAt,
+              };
+              yield* Queue.offer(events, { type: "provider_turn.updated", driver, providerTurn });
+              if ("wait" in response) {
+                held.set(providerTurnId, { input: turn, providerTurn });
+                return;
+              }
               if ("failure" in response) {
                 yield* Queue.offer(events, {
                   type: "turn.terminal",
@@ -281,8 +306,34 @@ function fakeAdapter(
               ]);
             }),
           steerTurn: () => Effect.die("unexpected steer"),
-          interruptTurn: () => Effect.die("unexpected live interrupt"),
-          respondToRuntimeRequest: () => Effect.die("unexpected runtime request"),
+          interruptTurn: ({ providerTurnId }) =>
+            Effect.gen(function* () {
+              const turn = held.get(providerTurnId);
+              if (turn === undefined) return;
+              held.delete(providerTurnId);
+              yield* Queue.offerAll(events, [
+                {
+                  type: "provider_turn.updated",
+                  driver,
+                  providerTurn: {
+                    ...turn.providerTurn,
+                    status: "interrupted",
+                    completedAt: yield* DateTime.now,
+                  },
+                },
+                {
+                  type: "turn.terminal",
+                  driver,
+                  providerThreadId: turn.providerTurn.providerThreadId,
+                  providerTurnId,
+                  runOrdinal: turn.input.runOrdinal,
+                  status: "interrupted",
+                  failure: null,
+                  threadDisposition: "reusable",
+                },
+              ]);
+            }),
+          respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () => Effect.die("unexpected snapshot read"),
           rollbackThread: () => Effect.die("unexpected rollback"),
           forkThread: () => Effect.die("unexpected native fork"),
@@ -291,17 +342,25 @@ function fakeAdapter(
   };
 }
 
-type Availability = "ready" | "disabled" | "removed";
+type Availability =
+  | "ready"
+  | "disabled"
+  | "removed"
+  | "uninstalled"
+  | "signed-out"
+  | "model-removed";
 
 const panelFixture = Effect.gen(function* () {
   const cwd = yield* checkpointWorkspace("panel-chat");
   const reply = yield* Ref.make<Reply>({ text: "Keep one queue for the application." });
   const availability = yield* Ref.make<Availability>("ready");
+  const seenTurns = yield* Ref.make<ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnInput>>([]);
   const codexAdapter = fakeAdapter(
     codex,
     ProviderDriverKind.make("codex"),
     CodexProviderCapabilitiesV2,
     reply,
+    seenTurns,
   );
   const claudeAdapter = fakeAdapter(
     claude,
@@ -314,6 +373,7 @@ const panelFixture = Effect.gen(function* () {
       },
     },
     reply,
+    seenTurns,
   );
   const codexSnapshot = providerSnapshot(codex, codexAdapter.driver, "Codex");
   const claudeSnapshot = providerSnapshot(claude, claudeAdapter.driver, "Claude");
@@ -354,12 +414,29 @@ const panelFixture = Effect.gen(function* () {
   });
   const adapterLayer = Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, registry);
   const database = SqlitePersistence.layerMemory;
+  const snapshotLayer = Layer.mock(ProviderRegistry.ProviderRegistry)({
+    getProviders: Ref.get(availability).pipe(
+      Effect.map((state) => [
+        {
+          ...codexSnapshot,
+          enabled: state !== "disabled",
+          installed: state !== "uninstalled",
+          auth:
+            state === "signed-out" ? { status: "unauthenticated" as const } : codexSnapshot.auth,
+          models: state === "model-removed" ? [] : codexSnapshot.models,
+        },
+        claudeSnapshot,
+      ]),
+    ),
+  });
   const dependencies = Layer.mergeAll(
     ProviderReplayHarness.layerWithRegistry({ name: "panel-chat" }, adapterLayer, {
       databaseLayer: database,
       runEffectWorker: false,
+      providerRegistryLayer: snapshotLayer,
     }),
     adapterLayer,
+    snapshotLayer,
     CommandReceiptStore.layer.pipe(Layer.provide(database)),
     ProjectionStore.layer.pipe(Layer.provide(database)),
     ProjectStore.layer.pipe(Layer.provide(database)),
@@ -370,20 +447,13 @@ const panelFixture = Effect.gen(function* () {
       Layer.provide(NodeServices.layer),
     ),
     Layer.mock(DocumentText.DocumentText)({}),
-    Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getProviders: Ref.get(availability).pipe(
-        Effect.map((state) => [
-          { ...codexSnapshot, enabled: state !== "disabled" },
-          claudeSnapshot,
-        ]),
-      ),
-    }),
   );
-  const layer = Layer.mergeAll(PanelChat.layer, ProviderRuntimeRecovery.layer).pipe(
-    Layer.provideMerge(ThreadManagement.layer),
-    Layer.provideMerge(dependencies),
-  );
-  return { cwd, layer, reply, availability };
+  const layer = Layer.mergeAll(
+    PanelChat.layer,
+    PanelTurnReactor.layer,
+    ProviderRuntimeRecovery.layer,
+  ).pipe(Layer.provideMerge(ThreadManagement.layer), Layer.provideMerge(dependencies));
+  return { cwd, layer, reply, availability, seenTurns };
 }).pipe(Effect.provide(NodeServices.layer));
 
 const dispatchClient = (command: OrchestrationV2Command) =>
@@ -482,6 +552,19 @@ const postPanel = (id: string, text: string) =>
     messageId: MessageId.make(id),
     text,
   });
+
+const awaitPanelEvent = Effect.fn("PanelTest.awaitPanelEvent")(function* (
+  afterSequence: number,
+  matches: (event: OrchestrationV2DomainEvent) => boolean,
+) {
+  const sink = yield* EventSink.EventSinkV2;
+  const stored = yield* sink.stream({ threadId: panelThreadId, afterSequence }).pipe(
+    Stream.filter(({ event }) => matches(event)),
+    Stream.runHead,
+  );
+  if (stored._tag === "None") return yield* Effect.die("Expected a persisted panel event.");
+  return stored.value.event;
+});
 
 const panelTurns = (projection: OrchestrationV2ThreadProjection) =>
   projection.runs.map(({ panelTurn }) => [
@@ -1158,6 +1241,320 @@ it.effect(
         );
       }).pipe(Effect.provide(fixture.layer));
     }),
+);
+
+it.effect(
+  "composes panelist and lookup prompts from the committed discussion without storing them",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* panelFixture;
+      yield* Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const reactor = yield* PanelTurnReactor.PanelTurnReactor;
+        const sink = yield* EventSink.EventSinkV2;
+        const readPanel = engine.getThreadProjection(panelThreadId);
+        yield* createParent(fixture.cwd);
+        yield* dispatchClient({
+          ...createPanel,
+          participants: [...createPanel.participants, codeAgent(selection(codex, "low"))],
+        });
+        const first = (yield* readPanel).runs[0]!;
+        yield* Ref.set(fixture.reply, { text: "Use one queue.\n@code Where is it defined?" });
+        const afterOpen = yield* sink.latestSequence();
+        yield* finishRun(panelThreadId, first.id);
+        const ended = yield* awaitPanelEvent(
+          afterOpen,
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === first.id &&
+            event.payload.status === "completed",
+        );
+        yield* reactor.handle(ended);
+        yield* reactor.handle(ended);
+        const lookup = (yield* readPanel).runs[1]!;
+        assert.lengthOf((yield* readPanel).runs, 2);
+        yield* Ref.set(fixture.reply, { text: "One queue is defined in queue.ts:42." });
+        yield* finishRun(panelThreadId, lookup.id);
+        const lookupInput = (yield* Ref.get(fixture.seenTurns)).find(
+          (turn) => turn.runId === lookup.id,
+        );
+        assert.include(lookupInput?.message.text, '<message from="@panel-model">Use one queue.');
+        assert.include(
+          lookupInput?.message.text,
+          'Requests to answer:\n<message from="@panel-model">@code Where is it defined?</message>',
+        );
+        assert.deepEqual(lookupInput?.runtimePolicy?.panel, { role: "code_agent" });
+        yield* settleCurrent(false);
+
+        const second = (yield* readPanel).runs[2]!;
+        yield* postPanel("message:z-first", "@code What about the tests?");
+        yield* postPanel("message:a-last", "@code Find the queue tests.");
+        yield* Ref.set(fixture.reply, { text: "Agreed." });
+        yield* finishRun(panelThreadId, second.id);
+        yield* settleCurrent(false);
+        const userLookup = (yield* readPanel).runs[3]!;
+        yield* postPanel("message:after-lookup", "@code Do not use this later post yet.");
+        yield* finishRun(panelThreadId, userLookup.id);
+
+        const seen = yield* Ref.get(fixture.seenTurns);
+        const secondInput = seen.find((turn) => turn.runId === second.id);
+        assert.include(
+          secondInput?.message.text,
+          '<message from="user">How should we simplify the queue?</message>',
+        );
+        assert.include(secondInput?.message.text, '<message from="@panel-model">Use one queue.');
+        assert.include(
+          secondInput?.message.text,
+          '<message from="@code">One queue is defined in queue.ts:42.</message>',
+        );
+        assert.notInclude(secondInput?.message.text, "Find the queue tests.");
+        assert.deepEqual(secondInput?.runtimePolicy?.panel, { role: "panelist" });
+        assert.isUndefined(secondInput?.appContext);
+        const userInput = seen.find((turn) => turn.runId === userLookup.id);
+        assert.include(
+          userInput?.message.text,
+          'Requests to answer:\n<message from="user">@code Find the queue tests.</message>',
+        );
+        assert.notInclude(userInput?.message.text, "Do not use this later post yet.");
+        const projection = yield* readPanel;
+        assert.deepEqual(
+          projection.messages
+            .filter((message) => message.panelParticipantId !== undefined)
+            .map((message) => message.text),
+          ["", "", "", ""],
+        );
+        const persistedMessages = yield* sink
+          .stream({ threadId: panelThreadId, eventType: "message.updated" })
+          .pipe(
+            Stream.takeUntil(
+              ({ event }) =>
+                event.type === "message.updated" &&
+                event.payload.runId === userLookup.id &&
+                event.payload.role === "assistant",
+            ),
+            Stream.runCollect,
+          );
+        assert.isFalse(
+          persistedMessages.some(
+            ({ event }) =>
+              event.type === "message.updated" && event.payload.text.includes("Discussion so far:"),
+          ),
+        );
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect.each(["disabled", "uninstalled", "signed-out", "model-removed"] as const)(
+  "settles a %s participant as unavailable before starting it",
+  (availability) =>
+    Effect.gen(function* () {
+      const fixture = yield* panelFixture;
+      yield* Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        yield* createParent(fixture.cwd);
+        yield* dispatchClient({
+          ...createPanel,
+          participants: [panelist(selection(codex, "low")), panelist(selection(claude, "low"))],
+        });
+        yield* Ref.set(fixture.availability, availability);
+        const { thread } = yield* engine.getThreadRecords(panelThreadId, []);
+        const runId = thread.panel!.current!.runId;
+        const failed = yield* finishRun(panelThreadId, runId);
+        assert.equal(failed.status, "failed");
+        assert.isNull(failed.startedAt);
+        const projection = yield* engine.getThreadProjection(panelThreadId);
+        const item = projection.turnItems.find((candidate) => candidate.type === "error");
+        assert.equal(item?.type === "error" && item.failure.code, "panel_participant_unavailable");
+        assert.isFalse((yield* Ref.get(fixture.seenTurns)).some((turn) => turn.runId === runId));
+        yield* settleCurrent(false);
+        assert.deepEqual(panelTurns(yield* engine.getThreadProjection(panelThreadId)), [
+          ["p1", "reply", "unavailable"],
+          ["p2", "reply", undefined],
+        ]);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect.each([
+  ["reply", PANEL_PANELIST_REPLY_LIMIT_MS],
+  ["lookup", PANEL_CODE_AGENT_REPLY_LIMIT_MS],
+] as const)("interrupts a live %s at its time limit and advances the panel", ([kind, limit]) =>
+  Effect.gen(function* () {
+    const fixture = yield* panelFixture;
+    yield* Effect.gen(function* () {
+      const engine = yield* Orchestrator.OrchestratorV2;
+      const reactor = yield* PanelTurnReactor.PanelTurnReactor;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      yield* createParent(fixture.cwd);
+      const afterParent = yield* sink.latestSequence();
+      yield* dispatchClient({
+        ...createPanel,
+        participants: [...createPanel.participants, codeAgent(selection(codex, "low"))],
+      });
+      if (kind === "lookup") {
+        yield* Ref.set(fixture.reply, { text: "Need evidence.\n@code Where does the queue live?" });
+        yield* settleCurrent();
+      }
+      const runId = (yield* engine.getThreadRecords(panelThreadId, [])).thread.panel!.current!
+        .runId;
+      yield* Ref.set(fixture.reply, { wait: true });
+      yield* worker.drain();
+      const started = yield* awaitPanelEvent(
+        afterParent,
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.id === runId &&
+          event.payload.status === "running",
+      );
+      yield* awaitPanelEvent(
+        afterParent,
+        (event) =>
+          event.type === "provider-turn.updated" &&
+          event.runId === runId &&
+          event.payload.status === "running",
+      );
+      yield* reactor.handle(started);
+      yield* TestClock.adjust(limit - 1);
+      yield* reactor.handle(started);
+      assert.isFalse(
+        (yield* engine.getThreadRecords(panelThreadId, [])).thread.panel?.current?.timedOut,
+      );
+      yield* TestClock.adjust(1);
+      yield* awaitPanelEvent(
+        afterParent,
+        (event) =>
+          event.type === "panel.updated" && event.payload.panel?.current?.timedOut === true,
+      );
+      yield* worker.drain();
+      const ended = yield* awaitPanelEvent(
+        afterParent,
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.id === runId &&
+          event.payload.status === "interrupted",
+      );
+      yield* reactor.handle(ended);
+      const projection = yield* engine.getThreadProjection(panelThreadId);
+      assert.equal(
+        projection.runs.find((run) => run.id === runId)?.panelTurn?.outcome,
+        "timed_out",
+      );
+      assert.equal(projection.thread.panel?.current?.participantId, "p2");
+    }).pipe(Effect.provide(fixture.layer));
+  }),
+);
+
+it.effect(
+  "declines panel approvals, dismisses questions, and cancels the deadline on archive",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* panelFixture;
+      yield* Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const reactor = yield* PanelTurnReactor.PanelTurnReactor;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+        yield* createParent(fixture.cwd);
+        const sequence = yield* sink.latestSequence();
+        yield* dispatchClient(createPanel);
+        yield* Ref.set(fixture.reply, { wait: true });
+        yield* worker.drain();
+        const started = yield* awaitPanelEvent(
+          sequence,
+          (event) => event.type === "run.updated" && event.payload.status === "running",
+        );
+        yield* reactor.handle(started);
+        const projection = yield* engine.getThreadProjection(panelThreadId);
+        const run = projection.runs[0]!;
+        const providerSessionId = projection.providerThreads.find(
+          (thread) => thread.id === run.providerThreadId,
+        )?.providerSessionId;
+        assert.isDefined(providerSessionId);
+        const now = yield* DateTime.now;
+        const live = { type: "live", providerSessionId: providerSessionId! } as const;
+        const requests = [
+          ["command", live, "decline"],
+          ["user_input", { type: "message" }, "cancel"],
+          ["user_input", live, "cancel"],
+        ] as const;
+        for (const [index, [kind, responseCapability, decision]] of requests.entries()) {
+          const requestId = RuntimeRequestId.make(`request:panel:${index}`);
+          const event = {
+            id: EventId.make(`event:panel:request:${index}`),
+            type: "runtime-request.updated",
+            threadId: panelThreadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: {
+              id: requestId,
+              nodeId: run.rootNodeId!,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              status: "pending",
+              kind,
+              responseCapability,
+              createdAt: now,
+              resolvedAt: null,
+            },
+          } as const satisfies OrchestrationV2DomainEvent;
+          yield* sink.write({ events: [event] });
+          yield* reactor.handle(event);
+          const after = yield* engine.getThreadProjection(panelThreadId);
+          assert.include(
+            after.runtimeRequests.find((request) => request.id === requestId),
+            {
+              status: "resolved",
+              decision,
+            },
+          );
+        }
+        yield* worker.drain();
+        const archived = yield* engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("command:archive-live-panel"),
+          threadId: panelThreadId,
+        });
+        const archiveEvent = archived.storedEvents.find(
+          ({ event }) => event.type === "thread.archived",
+        )!.event;
+        yield* reactor.handle(archiveEvent);
+        yield* TestClock.adjust(PANEL_PANELIST_REPLY_LIMIT_MS);
+        assert.equal(
+          (yield* receipts.getByCommandId(
+            CommandId.make(`panel:${panelThreadId}:time-limit:${run.id}`),
+          ))._tag,
+          "None",
+        );
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect("sweeps an in-flight panel to interrupted without starting another turn", () =>
+  Effect.gen(function* () {
+    const fixture = yield* panelFixture;
+    yield* Effect.gen(function* () {
+      const engine = yield* Orchestrator.OrchestratorV2;
+      const reactor = yield* PanelTurnReactor.PanelTurnReactor;
+      const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      yield* createParent(fixture.cwd);
+      yield* dispatchClient(createPanel);
+      yield* recovery.recover;
+      yield* reactor.start();
+      const projection = yield* engine.getThreadProjection(panelThreadId);
+      assert.include(projection.thread.panel, {
+        status: "idle",
+        idleReason: "interrupted",
+        cursor: "p1",
+        current: null,
+      });
+      assert.deepEqual(
+        projection.runs.map((run) => run.status),
+        ["cancelled"],
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  }),
 );
 
 it.effect(

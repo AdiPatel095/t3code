@@ -35,6 +35,7 @@ import {
 } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as PanelChatService from "./panel/PanelChatService.ts";
 
 const dispatchCommand = (command: OrchestrationV2Command, sender = { managesProviders: true }) =>
   ThreadMessageIntake.dispatchCommand(command, sender);
@@ -44,6 +45,7 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 }).pipe(
   Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
   Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provideMerge(Layer.mock(PanelChatService.PanelChatService)({})),
 );
 
 const layerFailingDispatchHandler =

@@ -105,6 +105,7 @@ import {
 import type {
   ProjectionRecordField,
   ProjectionRecordFilter,
+  ProjectionTimelinePageOptions,
 } from "../orchestration-v2/ProjectionStore.ts";
 import {
   delegatedTaskAwaitsWork,
@@ -1209,8 +1210,11 @@ function timelineItem(input: {
   readonly maxChars: number;
   readonly textOffset?: number;
   readonly messagesByThreadId: ReadonlyMap<ThreadId, OrchestrationV2ThreadProjection["messages"]>;
+  readonly panelSpeaker?: string;
 }): OrchestratorMcpThreadTimelineItem {
-  const text = turnItemText(input.row.item);
+  const body = turnItemText(input.row.item);
+  const text =
+    body === null || input.panelSpeaker === undefined ? body : `[${input.panelSpeaker}] ${body}`;
   const offset = input.textOffset ?? 0;
   const end = textPageEnd(text, offset, input.maxChars);
   const textTruncated = text !== null && text.length > end;
@@ -1594,6 +1598,48 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(threadManagementFailure));
     const target = { ...records, providerTurns, contextTransfers: [] };
     return { parent, target, shell, runCount } as const;
+  });
+
+  const loadReadTimeline = Effect.fn("OrchestratorMcpService.loadReadTimeline")(function* (
+    threadId: ThreadId,
+    options: ProjectionTimelinePageOptions,
+    panel: boolean,
+  ) {
+    const read = (page: ProjectionTimelinePageOptions) =>
+      threadManagement
+        .getTimelinePage(threadId, page)
+        .pipe(Effect.mapError(threadManagementFailure));
+    if (!panel) return yield* read(options);
+    const visible = (row: OrchestrationV2ThreadProjection["visibleTurnItems"][number]) =>
+      row.item.type !== "user_message" || row.item.panelParticipantId === undefined;
+    if (options.itemId !== undefined) {
+      const page = yield* read(options);
+      return { ...page, items: page.items.filter(visible) };
+    }
+
+    const backwards = options.beforePosition !== undefined;
+    const pageOptions = { ...options, limit: options.limit + 1 };
+    const first = yield* read(pageOptions);
+    const items = [];
+    let page = first;
+    for (;;) {
+      const matches = page.items.filter(visible);
+      items.push(...(backwards ? matches.reverse() : matches));
+      if (items.length > options.limit || !(backwards ? page.hasEarlier : page.hasMore)) break;
+      const edge = page.items.at(backwards ? 0 : -1)?.position;
+      if (edge === undefined) break;
+      page = yield* read({
+        ...pageOptions,
+        ...(backwards ? { beforePosition: edge } : { afterPosition: edge }),
+      });
+    }
+    const selected = items.slice(0, options.limit);
+    const more = items.length > options.limit;
+    return {
+      ...first,
+      items: backwards ? selected.reverse() : selected,
+      ...(backwards ? { hasEarlier: more } : { hasMore: more }),
+    };
   });
 
   const loadProviders = providerRegistry.getProviders;
@@ -3556,8 +3602,10 @@ const make = Effect.gen(function* () {
         input.beforePosition !== undefined ||
         (input.afterPosition === undefined &&
           (scope.thread !== undefined || scope.client?.linked === true));
-      const timeline = yield* threadManagement
-        .getTimelinePage(input.threadId, {
+      const panel = target.thread.panel;
+      const timeline = yield* loadReadTimeline(
+        input.threadId,
+        {
           ...(input.afterPosition === undefined ? {} : { afterPosition: input.afterPosition }),
           ...(newestFirst
             ? { beforePosition: input.beforePosition ?? Number.POSITIVE_INFINITY }
@@ -3565,8 +3613,39 @@ const make = Effect.gen(function* () {
           limit,
           view,
           ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
-        })
-        .pipe(Effect.mapError(threadManagementFailure));
+        },
+        panel !== undefined,
+      );
+      const panelSpeakers = new Map<RunId, string>();
+      if (panel !== undefined) {
+        const assistantRunIds = new Set(
+          timeline.items.flatMap((row) =>
+            row.sourceThreadId === input.threadId &&
+            row.item.type === "assistant_message" &&
+            row.item.runId !== null
+              ? [row.item.runId]
+              : [],
+          ),
+        );
+        const knownRunIds = new Set(target.runs.map((run) => run.id));
+        const missingRunIds = [...assistantRunIds].filter((runId) => !knownRunIds.has(runId));
+        const pageRuns =
+          missingRunIds.length === 0
+            ? []
+            : (yield* threadManagement
+                .getThreadRecords(input.threadId, ["runs"], { runIds: missingRunIds })
+                .pipe(Effect.mapError(threadManagementFailure))).runs;
+        const participants = new Map(
+          panel.participants.map((participant) => [participant.id, participant]),
+        );
+        for (const run of [...target.runs, ...pageRuns]) {
+          if (!assistantRunIds.has(run.id) || run.panelTurn === undefined) continue;
+          const participant = participants.get(run.panelTurn.participantId);
+          if (participant === undefined) continue;
+          const name = participant.role === "code_agent" ? "Code agent" : participant.name;
+          panelSpeakers.set(run.id, `${name} (@${participant.handle})`);
+        }
+      }
       const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
       for (const row of timeline.items) {
         if (row.item.type !== "user_message" && row.item.type !== "assistant_message") continue;
@@ -3601,12 +3680,21 @@ const make = Effect.gen(function* () {
         .map((run) => threadRun(target, run));
       const { items, start } = timelineItemsWithinBudget(
         { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
-        timeline.items.map((row) => ({
-          row,
-          maxChars,
-          messagesByThreadId,
-          ...(input.itemId === undefined ? {} : { textOffset: input.textOffset ?? 0 }),
-        })),
+        timeline.items.map((row) => {
+          const panelSpeaker =
+            row.item.type === "assistant_message" &&
+            row.sourceThreadId === input.threadId &&
+            row.item.runId !== null
+              ? panelSpeakers.get(row.item.runId)
+              : undefined;
+          return {
+            row,
+            maxChars,
+            messagesByThreadId,
+            ...(panelSpeaker === undefined ? {} : { panelSpeaker }),
+            ...(input.itemId === undefined ? {} : { textOffset: input.textOffset ?? 0 }),
+          };
+        }),
         newestFirst,
       );
       const page = timeline.items.slice(start, start + items.length);

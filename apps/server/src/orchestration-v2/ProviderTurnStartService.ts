@@ -7,8 +7,13 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   latestProviderTurnForAttempt,
   withMessageSenderNote,
+  type MessageId,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ContextHandoff,
+  type OrchestrationV2PanelParticipant,
+  type OrchestrationV2PanelState,
+  type OrchestrationV2PanelTurn,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
@@ -33,6 +38,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import {
@@ -43,10 +49,13 @@ import { withTurnStartReservation, withWorkspaceLease } from "../workspace/works
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { requireAdvertisedModel, withWorkspaceModels } from "../mcp/OrchestratorMcpService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { makeRestoreMissingWorktree } from "../workspace/restoreMissingWorktree.ts";
 import type * as TaskFolders from "../workspace/TaskFolders.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import { canForkBusySourceNatively, isActiveRun } from "./CommandPolicy.ts";
@@ -70,6 +79,9 @@ import { isProviderCommand, outputInstructions } from "./runOutput.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import { buildPanelPrompt } from "./panel/PanelPromptBuilder.ts";
+import { panelTranscript } from "./panel/PanelTranscript.ts";
 import { unsentManualContinuationSource } from "@t3tools/shared/orchestrationV2ManualContinuation";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
@@ -273,6 +285,7 @@ export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
   | EventSink.EventSinkV2
+  | EventStore.EventStoreV2
   | ContextHandoffService.ContextHandoffServiceV2
   | IdAllocator.IdAllocatorV2
   | FileSystem.FileSystem
@@ -281,7 +294,9 @@ export const layer: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | GitWorkflowService.GitWorkflowService
   | ProjectService.ProjectService
+  | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ProviderAuthService.ProviderAuthService
+  | ProviderRegistry.ProviderRegistry
   | ProjectionStore.ProjectionStoreV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunExecutionService.RunExecutionServiceV2
@@ -292,6 +307,9 @@ export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
+    const eventStore = yield* EventStore.EventStoreV2;
+    const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    const providers = yield* ProviderRegistry.ProviderRegistry;
     const turnAnalytics = yield* ProviderUsageAnalytics.ProviderTurnAnalytics;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -539,6 +557,137 @@ export const layer: Layer.Layer<
       },
     );
 
+    const panelUnavailableReason = Effect.fn("ProviderTurnStartService.panelUnavailableReason")(
+      function* (run: OrchestrationV2Run, turn: OrchestrationV2PanelTurn, cwd: string | undefined) {
+        const instanceId = run.modelSelection.instanceId;
+        const getMetadata = providerAdapters.getMetadata;
+        if (getMetadata === undefined) return "Provider instance is unavailable.";
+        const metadata = yield* getMetadata(instanceId).pipe(Effect.orElseSucceed(() => undefined));
+        if (metadata === undefined) return "Provider instance is unavailable.";
+        if (!metadata.enabled) return "Provider instance is disabled.";
+        const cap = metadata.capabilities.runtimePolicy.panelChat;
+        if (cap === undefined || (turn.kind === "lookup" && cap.readOnly !== "enforced")) {
+          return "Provider instance no longer supports this panel role.";
+        }
+        const provider = withWorkspaceModels(yield* providers.getProviders, cwd).find(
+          (candidate) => candidate.instanceId === instanceId,
+        );
+        if (provider === undefined) return "Provider snapshot is unavailable.";
+        if (!provider.installed) return "Provider executable is not installed.";
+        if (provider.auth.status === "unauthenticated") return "Provider is not authenticated.";
+        const model = run.modelSelection.model;
+        if (provider.models.length === 0) return `Model ${model} is no longer advertised.`;
+        return yield* requireAdvertisedModel(provider, model).pipe(
+          Effect.as(undefined),
+          Effect.catch((error) => Effect.succeed(error.message)),
+        );
+      },
+    );
+
+    const panelPrompt = Effect.fn("ProviderTurnStartService.panelPrompt")(function* (input: {
+      readonly run: OrchestrationV2Run;
+      readonly runs: ReadonlyArray<OrchestrationV2Run>;
+      readonly panel: OrchestrationV2PanelState;
+      readonly turn: OrchestrationV2PanelTurn;
+      readonly participant: OrchestrationV2PanelParticipant;
+      readonly marker: OrchestrationV2ConversationMessage;
+    }) {
+      const { run, runs, panel, turn, participant, marker } = input;
+      const { messages, turnItems } = yield* projectionStore.getThreadRecords(
+        run.threadId,
+        ["messages", "turnItems"],
+        {
+          messageRoles: ["user", "assistant"],
+          turnItemRunIds: [null],
+          turnItemTypes: ["user_message"],
+        },
+      );
+      const topic = turnItems[0];
+      if (topic?.type !== "user_message") {
+        return yield* new ProviderTurnStartError({
+          runId: run.id,
+          cause: "Panel topic is missing.",
+        });
+      }
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      const markerTime = marker.createdAt.epochMilliseconds;
+      const posts = turnItems.flatMap((item) => {
+        const message = item.type === "user_message" ? byId.get(item.messageId) : undefined;
+        return message !== undefined && message.createdAt.epochMilliseconds <= markerTime
+          ? [message]
+          : [];
+      });
+      // Appends can share a clock tick. The marker's event separates posts before and after dispatch.
+      const needsPostOrder = posts
+        .slice(1)
+        .some((post) => post.createdAt.epochMilliseconds === markerTime);
+      const postsAtMarker = needsPostOrder
+        ? yield* eventStore.read({ threadId: run.threadId, eventType: "message.updated" }).pipe(
+            Stream.takeWhile(
+              ({ event }) => event.type !== "message.updated" || event.payload.id !== marker.id,
+            ),
+            Stream.runFold(
+              () => new Set<MessageId>(),
+              (ids, { event }) => {
+                if (
+                  event.type === "message.updated" &&
+                  event.payload.role === "user" &&
+                  event.payload.runId === null &&
+                  event.payload.createdAt.epochMilliseconds === markerTime
+                ) {
+                  ids.add(event.payload.id);
+                }
+                return ids;
+              },
+            ),
+          )
+        : undefined;
+      const earlierPosts = posts.filter(
+        (post) =>
+          postsAtMarker === undefined ||
+          post.createdAt.epochMilliseconds < markerTime ||
+          postsAtMarker.has(post.id),
+      );
+      const replies = messages.filter((message) => message.role === "assistant");
+      const transcript = panelTranscript({
+        panel,
+        topicMessageId: topic.messageId,
+        messages: [...earlierPosts, ...replies, marker],
+        runs,
+        beforeRunId: run.id,
+      });
+
+      let requests: ReadonlyArray<{ readonly from: string; readonly text: string }> = [];
+      if (turn.kind === "lookup") {
+        if (turn.askedBy === "user") {
+          const post = earlierPosts.at(-1);
+          if (post !== undefined && post.id !== topic.messageId) {
+            requests = [{ from: "user", text: post.text }];
+          }
+        } else {
+          const askingRun = runs.findLast(
+            (source) =>
+              source.ordinal < run.ordinal &&
+              source.panelTurn?.kind === "reply" &&
+              source.panelTurn.participantId === turn.askedBy,
+          );
+          const asker = panel.participants.find((candidate) => candidate.id === turn.askedBy);
+          if (askingRun !== undefined && asker !== undefined) {
+            requests = [
+              {
+                from: `@${asker.handle}`,
+                text: replies
+                  .filter((message) => message.runId === askingRun.id)
+                  .map((message) => message.text)
+                  .join("\n\n"),
+              },
+            ];
+          }
+        }
+      }
+      return buildPanelPrompt({ panel, participant, turn, ...transcript, requests });
+    });
+
     const start = Effect.fn("orchestrationV2.providerTurnStart.start")(function* (
       input: {
         readonly threadId: ThreadId;
@@ -546,6 +695,7 @@ export const layer: Layer.Layer<
         readonly willRetry?: boolean;
       },
       captureStartingRun: (run: OrchestrationV2Run) => void,
+      cwd: string | undefined,
     ) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -557,6 +707,7 @@ export const layer: Layer.Layer<
         return;
       }
       captureStartingRun(run);
+      const panelTurn = run.panelTurn;
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -607,6 +758,7 @@ export const layer: Layer.Layer<
         ContextHandoffService.isSideChatContextHandoff(handoff);
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          panelTurn === undefined &&
           !isSideChatHandoff(handoff) &&
           (handoff.transferId == null || !subagentResultTransfers.has(handoff.transferId)) &&
           isPendingForRun(handoff),
@@ -616,6 +768,7 @@ export const layer: Layer.Layer<
       // run is a side conversation, so the thread's next turn still gets them.
       const carriedSideChatHandoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          panelTurn === undefined &&
           isSideChatHandoff(handoff) &&
           handoff.delivery === undefined &&
           isPendingForRun(handoff, true),
@@ -623,6 +776,7 @@ export const layer: Layer.Layer<
       const sideChatHandoff = run.freshContext === true ? undefined : carriedSideChatHandoffs[0];
       const nativeForkTransfer = projection.contextTransfers.find(
         (transfer) =>
+          panelTurn === undefined &&
           transfer.type === "fork" &&
           transfer.targetThreadId === input.threadId &&
           transfer.targetRunId === run.id &&
@@ -668,7 +822,9 @@ export const layer: Layer.Layer<
         if (!retired.committed) return;
       }
       const manualResume =
-        run.manualContinuationOfRunId !== undefined && attempt.reason !== "steering_restart";
+        panelTurn === undefined &&
+        run.manualContinuationOfRunId !== undefined &&
+        attempt.reason !== "steering_restart";
       const resumeSource = manualResume
         ? unsentManualContinuationSource(run, projection)
         : undefined;
@@ -676,7 +832,46 @@ export const layer: Layer.Layer<
         resumeSource !== undefined
           ? projection.messages.find((source) => source.id === resumeSource.userMessageId)
           : undefined;
-      const providerMessage = unsentResumeMessage ?? message;
+      let providerMessage = unsentResumeMessage ?? message;
+      if (panelTurn !== undefined) {
+        const panel = projection.thread.panel;
+        const participant = panel?.participants.find(
+          (candidate) => candidate.id === panelTurn.participantId,
+        );
+        const unavailable = yield* panelUnavailableReason(run, panelTurn, cwd);
+        if (unavailable !== undefined || panel === undefined || participant === undefined) {
+          yield* settleRunBeforeStart({
+            run,
+            rootNode,
+            attempt,
+            turnItems: projection.turnItems,
+            signal: "panel-participant-unavailable",
+            status: "failed",
+            now: yield* DateTime.now,
+            providerInstanceId: run.providerInstanceId,
+            itemProviderThreadId: providerThread.id,
+            item: {
+              type: "error",
+              title: "Panel participant unavailable",
+              failure: makeProviderFailure({
+                class: "provider_error",
+                code: "panel_participant_unavailable",
+                message: unavailable ?? "Panel participant is unavailable.",
+              }),
+            },
+          });
+          return;
+        }
+        const text = yield* panelPrompt({
+          run,
+          runs: projection.runs,
+          panel,
+          turn: panelTurn,
+          participant,
+          marker: message,
+        });
+        providerMessage = { ...message, text };
+      }
       const settleStartFailure = Effect.fn("ProviderTurnStartService.settleStartFailure")(
         function* (failed: {
           readonly signal: string;
@@ -882,6 +1077,7 @@ export const layer: Layer.Layer<
         .resolve({
           thread: projection.thread,
           modelSelection: run.modelSelection,
+          ...(panelTurn === undefined ? {} : { panelTurnKind: panelTurn.kind }),
         })
         .pipe(Effect.result);
       if (resolvedPolicy._tag === "Failure") {
@@ -970,10 +1166,12 @@ export const layer: Layer.Layer<
           providerSessionId,
           modelSelection: run.modelSelection,
           runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
+          ...(existingSessionProjection === undefined || panelTurn !== undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null || brokenNativeThread
+          ...(providerThread.nativeThreadRef?.nativeId == null ||
+          brokenNativeThread ||
+          panelTurn !== undefined
             ? {}
             : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
           ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
@@ -1017,13 +1215,16 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const messageText = withMessageSenderNote(
-        providerMessage,
-        projectComposerContextForProvider({
-          text: providerMessage.text,
-          records: providerMessage.context?.records ?? [],
-        }),
-      );
+      const messageText =
+        panelTurn !== undefined
+          ? providerMessage.text
+          : withMessageSenderNote(
+              providerMessage,
+              projectComposerContextForProvider({
+                text: providerMessage.text,
+                records: providerMessage.context?.records ?? [],
+              }),
+            );
       const slashCommand = isSlashCommandMessage(providerMessage);
       const goalDriver =
         session.driver === "codex" ||
@@ -1032,7 +1233,10 @@ export const layer: Layer.Layer<
       const goalCommand = goalDriver && parseGoalCommand(providerMessage) !== null;
       // Part of the user text, so every way a turn starts carries it, after the user's own words.
       const userText =
-        run.outputSchema === undefined || goalCommand || isProviderCommand(providerMessage)
+        panelTurn !== undefined ||
+        run.outputSchema === undefined ||
+        goalCommand ||
+        isProviderCommand(providerMessage)
           ? messageText
           : `${messageText}\n\n${outputInstructions(run.outputSchema)}`;
       // The provider turn marks cancellation work delivered; restart continuations use their own text or resume natively.
@@ -1567,7 +1771,7 @@ export const layer: Layer.Layer<
           });
           return loaded;
         }
-        if (providerThread.nativeThreadRef === null) {
+        if (providerThread.nativeThreadRef === null || panelTurn !== undefined) {
           // Pass the stored provider row for adoption; adapter-minted duplicates make activeProviderThreadId flap.
           return yield* loadFromProvider(
             session.ensureThread({
@@ -1902,14 +2106,18 @@ export const layer: Layer.Layer<
         legacyInputRunIds,
         budget,
       } = handoffContext;
-      const retryHandoff = resumedRetryHandoff ?? (yield* prepareRetryHandoff(handoffContext));
+      const retryHandoff =
+        panelTurn !== undefined
+          ? { handoffs: [], attachments: [] }
+          : (resumedRetryHandoff ?? (yield* prepareRetryHandoff(handoffContext)));
       const carriesPendingContext =
-        effectiveHandoffs.length > 0 ||
-        retryHandoff.handoffs.length > 0 ||
-        retryHandoff.attachments.length > 0 ||
-        sideChatHandoff !== undefined ||
-        restartNote !== "" ||
-        noteContinuation;
+        panelTurn === undefined &&
+        (effectiveHandoffs.length > 0 ||
+          retryHandoff.handoffs.length > 0 ||
+          retryHandoff.attachments.length > 0 ||
+          sideChatHandoff !== undefined ||
+          restartNote !== "" ||
+          noteContinuation);
       // Pending context turns the resume into a prompted turn, which needs no native resume.
       if (
         manualResume &&
@@ -2238,9 +2446,18 @@ export const layer: Layer.Layer<
               }),
         ),
       );
-      const deliverySession = carriesPendingContext
-        ? makeDeliverySession(session, startWithHandoffs)
-        : session;
+      const deliverySession =
+        panelTurn !== undefined
+          ? {
+              ...session,
+              startTurn: ({
+                appContext: _appContext,
+                ...input
+              }: Parameters<typeof session.startTurn>[0]) => session.startTurn(input),
+            }
+          : carriesPendingContext
+            ? makeDeliverySession(session, startWithHandoffs)
+            : session;
       return runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
@@ -2321,16 +2538,16 @@ export const layer: Layer.Layer<
                 .getById(thread.projectId, { includeDeleted: true })
                 .pipe(Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot)));
             const providerTurn = yield* cwd === undefined
-              ? start(input, captureStartingRun)
+              ? start(input, captureStartingRun, cwd)
               : withTurnStartReservation(
                   fileSystem,
                   path,
                   path.resolve(cwd),
                   thread.worktreePath === null
-                    ? start(input, captureStartingRun)
+                    ? start(input, captureStartingRun, cwd)
                     : withWorkspaceLease(
                         path.resolve(thread.worktreePath),
-                        start(input, captureStartingRun),
+                        start(input, captureStartingRun, cwd),
                       ),
                 );
             if (providerTurn !== undefined) {

@@ -30,6 +30,7 @@ import {
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+  type OrchestrationV2RuntimePolicyCapabilities,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettings,
@@ -84,6 +85,7 @@ import type {
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
@@ -507,10 +509,13 @@ const makeUpdateState = (status: ServerProviderUpdateState["status"]) =>
 // One Codex instance whose probe returns whatever `snapshot` currently holds.
 const buildRegistryOverSnapshot = Effect.fn("buildRegistryOverSnapshot")(function* (
   snapshot: Ref.Ref<ServerProvider>,
+  panelChat?: OrchestrationV2RuntimePolicyCapabilities["panelChat"],
 ) {
   const driver = ProviderDriverKind.make("codex");
+  const instanceId = ProviderInstanceId.make("codex");
+  const { panelChat: _panelChat, ...runtimePolicy } = CodexProviderCapabilitiesV2.runtimePolicy;
   const instance = {
-    instanceId: ProviderInstanceId.make("codex"),
+    instanceId,
     driverKind: driver,
     continuationIdentity: { driverKind: driver, continuationKey: "codex:instance:codex" },
     displayName: undefined,
@@ -525,7 +530,20 @@ const buildRegistryOverSnapshot = Effect.fn("buildRegistryOverSnapshot")(functio
       streamChanges: Stream.empty,
       applyUsageLimits: () => Effect.void,
     },
-    orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+    orchestrationAdapter: {
+      instanceId,
+      driver,
+      getCapabilities: () =>
+        Effect.succeed({
+          ...CodexProviderCapabilitiesV2,
+          runtimePolicy: {
+            ...runtimePolicy,
+            ...(panelChat === undefined ? {} : { panelChat }),
+          },
+        }),
+      planSelectionTransition: () => Effect.die("Unexpected selection transition"),
+      openSession: () => Effect.die("Unexpected provider session"),
+    },
     textGeneration: {} as ProviderInstance["textGeneration"],
   } satisfies ProviderInstance;
   const layerInstanceRegistry = Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -4015,6 +4033,40 @@ it.layer(
           ]);
         }).pipe(Effect.provide(runtimeServices));
       }),
+    );
+
+    it.effect.each([
+      {
+        label: "enforced",
+        capability: { readOnly: "enforced", panelistToolsRemoved: true },
+        expected: { panelist: true, codeAgent: true, panelistToolsRemoved: true },
+      },
+      {
+        label: "declined",
+        capability: { readOnly: "declined", panelistToolsRemoved: false },
+        expected: { panelist: true, codeAgent: false, panelistToolsRemoved: false },
+      },
+      {
+        label: "absent",
+        capability: undefined,
+        expected: undefined,
+      },
+    ] as const)(
+      "publishes the $label adapter panel role capability at boot and refresh",
+      ({ capability, expected }) =>
+        Effect.gen(function* () {
+          const snapshot = yield* Ref.make<ServerProvider>(codexUpdateSnapshot("current"));
+          const services = yield* buildRegistryOverSnapshot(snapshot, capability);
+          yield* Effect.gen(function* () {
+            const registry = yield* ProviderRegistry.ProviderRegistry;
+            const [boot] = yield* registry.getProviders;
+            const [refreshed] = yield* registry.refreshInstance(ProviderInstanceId.make("codex"));
+            for (const provider of [boot, refreshed]) {
+              expect(provider?.panelChat).toEqual(expected);
+              if (expected === undefined) expect(provider).not.toHaveProperty("panelChat");
+            }
+          }).pipe(Effect.provide(services));
+        }),
     );
 
     describe("update results across refreshes", () => {

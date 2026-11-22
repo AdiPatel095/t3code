@@ -7,7 +7,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { rpcAuthorizationError } from "../auth/RpcAuthorization.ts";
@@ -138,20 +137,14 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     incoming.type === "panel.post" ||
     incoming.type === "panel.continue"
   ) {
-    const panels = yield* Effect.serviceOption(PanelChat.PanelChatService);
-    if (Option.isNone(panels)) {
-      return yield* new PanelChat.PanelChatError({
-        commandId: incoming.commandId,
-        message: "Panel chats are unavailable.",
-      });
-    }
+    const panels = yield* PanelChat.PanelChatService;
     switch (incoming.type) {
       case "panel.create":
-        return yield* panels.value.create(incoming);
+        return yield* panels.create(incoming);
       case "panel.post":
-        return yield* panels.value.post(incoming);
+        return yield* panels.post(incoming);
       case "panel.continue":
-        return yield* panels.value.continue(incoming);
+        return yield* panels.continue(incoming);
     }
   }
   const command =
