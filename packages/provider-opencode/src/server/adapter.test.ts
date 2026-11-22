@@ -5123,14 +5123,15 @@ describe("OpenCodeAdapterV2", () => {
   });
 
   it("enforces non-interactive sandbox policy through OpenCode permissions", () => {
+    const sandboxPolicy = {
+      type: "readOnly",
+      access: { type: "fullAccess" },
+      networkAccess: false,
+    };
     const readOnly = openCodePermissionRules(
       runtimePolicy("full-access", {
         approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "readOnly",
-          access: { type: "fullAccess" },
-          networkAccess: false,
-        },
+        sandboxPolicy,
       }),
     );
     assert.equal(permissionAction(readOnly, "read"), "allow");
@@ -5140,6 +5141,29 @@ describe("OpenCodeAdapterV2", () => {
     assert.equal(permissionAction(readOnly, "doom_loop"), "deny");
     assert.equal(permissionAction(readOnly, "unknown_plugin_tool"), "deny");
     assert.equal(permissionAction(readOnly, "external_directory"), "allow");
+
+    const panelPolicy = runtimePolicy("approval-required", {
+      approvalPolicy: "never",
+      sandboxPolicy,
+    });
+    const codeAgent = openCodePermissionRules({ ...panelPolicy, panel: { role: "code_agent" } });
+    assert.deepEqual(codeAgent, readOnly);
+    const panelistPolicy = runtimePolicy("approval-required", {
+      ...panelPolicy,
+      panel: { role: "panelist" },
+    });
+    const panelist = openCodePermissionRules(panelistPolicy);
+    assert.deepInclude(panelist, { permission: "*", pattern: "*", action: "deny" });
+    assert.isTrue(panelist.every((rule) => rule.action === "deny"));
+    for (const action of ["read", "glob", "grep", "edit", "bash", "user_mcp_tool"]) {
+      assert.equal(permissionAction(panelist, action), "deny");
+    }
+    assert.deepEqual(
+      openCodeChildPermissionRules(panelistPolicy, [
+        { permission: "read", pattern: "*", action: "allow" },
+      ]),
+      panelist,
+    );
 
     const workspaceWrite = openCodePermissionRules(
       runtimePolicy("auto-accept-edits", {

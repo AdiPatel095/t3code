@@ -61,6 +61,10 @@ const ANTIGRAVITY_PROVIDER = ProviderDriverKind.make("antigravity");
 
 const AntigravityProviderCapabilitiesV2 = {
   ...AcpProviderCapabilitiesV2,
+  runtimePolicy: {
+    ...AcpProviderCapabilitiesV2.runtimePolicy,
+    panelChat: { readOnly: "declined", panelistToolsRemoved: false },
+  },
   sessions: {
     ...AcpProviderCapabilitiesV2.sessions,
     supportsModelSwitchInSession: true,

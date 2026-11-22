@@ -206,6 +206,7 @@ const OpenCodeProviderCapabilitiesV2 = {
   },
   runtimePolicy: {
     enforcement: "native",
+    panelChat: { readOnly: "enforced", panelistToolsRemoved: true },
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
@@ -651,6 +652,7 @@ const OPENCODE_RESTRICTED_PERMISSIONS = [
 export function openCodePermissionRules(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
 ): PermissionRuleset {
+  const panelist = runtimePolicy.panel?.role === "panelist";
   const sandboxPolicy = recordValue(runtimePolicy, "sandboxPolicy");
   const sandboxType = recordString(sandboxPolicy, "type");
   const rawApprovalPolicy = runtimePolicy.approvalPolicy;
@@ -665,7 +667,11 @@ export function openCodePermissionRules(
   const implicitFullAccess =
     sandboxType === undefined && runtimePolicy.runtimeMode === "full-access";
 
-  if (!requiresApproval && (externallySandboxed || dangerFullAccess || implicitFullAccess)) {
+  if (
+    !panelist &&
+    !requiresApproval &&
+    (externallySandboxed || dangerFullAccess || implicitFullAccess)
+  ) {
     // Task children copy only external_directory and deny rules before their first tool call.
     return [
       { permission: "*", pattern: "*", action: "allow" },
@@ -682,6 +688,7 @@ export function openCodePermissionRules(
       action: "deny" as const,
     })),
   ];
+  if (panelist) return rules;
 
   if (requiresApproval) {
     rules.push({ permission: "*", pattern: "*", action: "ask" });
@@ -774,6 +781,7 @@ export function openCodeChildPermissionRules(
   previousParentRules: PermissionRuleset = [],
 ): PermissionRuleset {
   const parentRules = openCodePermissionRules(runtimePolicy);
+  if (runtimePolicy.panel?.role === "panelist") return parentRules;
   const inheritedRules = [
     ...parentRules.filter(
       (rule) => rule.permission === "external_directory" || rule.action === "deny",

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import type { RuntimeMode } from "@t3tools/contracts";
+import type { OrchestrationV2PanelRole, RuntimeMode } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -9,6 +9,7 @@ export interface AcpRuntimePolicy {
   readonly cwd: string | null;
   readonly approvalPolicy?: unknown;
   readonly sandboxPolicy?: unknown;
+  readonly panel?: { readonly role: OrchestrationV2PanelRole } | undefined;
   readonly workspace?: { readonly extraRoots: ReadonlyArray<string> } | undefined;
 }
 
@@ -146,10 +147,12 @@ function acpOperationDisposition(
   runtimePolicy: AcpRuntimePolicy,
   operation: AcpPolicyOperation,
 ): AcpPermissionDisposition {
+  if (runtimePolicy.panel?.role === "panelist") return "deny";
   const toolKind = operation.kind ?? "other";
   if (isAcpReadKind(toolKind)) {
     return acpReadDisposition(runtimePolicy);
   }
+  if (runtimePolicy.panel !== undefined) return "deny";
   if (acpPolicyRequiresApproval(runtimePolicy)) {
     return "ask";
   }
@@ -205,7 +208,7 @@ export function acpMcpToolApprovalElicitationDisposition(
   runtimePolicy: AcpRuntimePolicy,
   request: EffectAcpSchema.CreateElicitationRequest,
   nativeRequestId?: string,
-): "ask" | "allow" | undefined {
+): AcpPermissionDisposition | undefined {
   if (
     request.mode !== "form" ||
     (unknownRecord(request._meta)?.codex_approval_kind !== "mcp_tool_call" &&
@@ -213,6 +216,7 @@ export function acpMcpToolApprovalElicitationDisposition(
   ) {
     return undefined;
   }
+  if (runtimePolicy.panel !== undefined) return "deny";
   // T3's authenticated MCP endpoint enforces scope; only explicit approval mode needs a user prompt.
   return acpPolicyRequiresApproval(runtimePolicy) ? "ask" : "allow";
 }

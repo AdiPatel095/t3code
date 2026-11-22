@@ -69,6 +69,28 @@ describe("fx permission prompts", () => {
       );
     }
   });
+
+  it("keeps panel permissions in supervised mode and answers them without prompting", () => {
+    for (const role of ["panelist", "code_agent"] as const) {
+      const policy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/work",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        panel: { role },
+      });
+      assert.equal(fxSessionModeForPolicy(policy), "ask");
+      assert.equal(fxPermissionDisposition(policy, editRequest), "deny");
+      assert.equal(
+        fxPermissionDisposition(policy, {
+          ...editRequest,
+          toolCall: { ...editRequest.toolCall, kind: "read" },
+        }),
+        role === "panelist" ? "deny" : "allow",
+      );
+    }
+  });
 });
 
 describe("fx model selection", () => {

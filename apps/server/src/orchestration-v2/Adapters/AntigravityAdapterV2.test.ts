@@ -516,6 +516,37 @@ describe("AntigravityAdapterV2 client file system", () => {
         context("fs/read_text_file"),
       );
       assert.equal(viaInsideLink.content, "inside");
+
+      for (const role of ["panelist", "code_agent"] as const) {
+        const panelThreadId = ThreadId.make(`thread-antigravity-file-${role}`);
+        const panelPolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          ...runtimePolicy,
+          runtimeMode: "approval-required",
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+          panel: { role },
+        });
+        const panelSession = yield* adapter.openSession({
+          threadId: panelThreadId,
+          providerSessionId: ProviderSessionId.make(`provider-session-antigravity-file-${role}`),
+          modelSelection,
+          runtimePolicy: panelPolicy,
+        });
+        yield* panelSession.ensureThread({
+          threadId: panelThreadId,
+          modelSelection,
+          runtimePolicy: panelPolicy,
+        });
+        const panelRead = readTextFile(
+          { sessionId: "mock-session-1", path: insidePath },
+          context("fs/read_text_file"),
+        );
+        if (role === "panelist") {
+          assert.propertyVal(yield* panelRead.pipe(Effect.flip), "code", -32603);
+        } else {
+          assert.equal((yield* panelRead).content, "inside");
+        }
+      }
     }).pipe(Effect.provide(layerSession)),
   );
 });

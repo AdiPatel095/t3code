@@ -3393,6 +3393,61 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       assert.equal(created.nativeThreadRef?.nativeId, SESSION);
     }),
   );
+  it.effect.each(["panelist", "code_agent"] as const)(
+    "installs final read-only permission rules for a panel %s",
+    (role) =>
+      Effect.gen(function* () {
+        const permissions = [
+          ...supervisedRules.slice(0, 3),
+          { action: "external_directory", resource: "/repos/api/*", effect: "allow" },
+          ...buildPaths,
+          { action: "*", resource: "*", effect: "deny" },
+          ...(role === "code_agent"
+            ? [
+                { action: "read", resource: "*", effect: "allow" },
+                { action: "glob", resource: "*", effect: "allow" },
+                { action: "grep", resource: "*", effect: "allow" },
+                { action: "read", resource: "*.env", effect: "deny" },
+                { action: "read", resource: "*.env.*", effect: "deny" },
+                { action: "read", resource: "*.env.example", effect: "allow" },
+              ]
+            : []),
+          { action: "shell", resource: "*", effect: "deny" },
+          { action: "edit", resource: "*", effect: "deny" },
+          { action: "external_directory", resource: "*", effect: "deny" },
+          { action: "*_*", resource: "*", effect: "deny" },
+          ...(role === "panelist" ? [{ action: "*", resource: "*", effect: "deny" }] : []),
+        ];
+        const runtime = yield* openCode2ReplayRuntime([
+          ...opening,
+          out("agent.list", "<any>"),
+          reply("agent.list", agentList),
+          out("session.create", {
+            location: { directory: WORK },
+            model: { providerID: "opencode", id: "big-pickle" },
+            permissions,
+          }),
+          replyData("session.create", sessionInfo({ permissions })),
+        ]);
+        const created = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: {
+            ...policy("approval-required"),
+            approvalPolicy: "never",
+            sandboxPolicy: {
+              type: "readOnly",
+              access: { type: "fullAccess" },
+              networkAccess: false,
+            },
+            workspace: { folders: [], extraRoots: ["/repos/api/"] },
+            panel: { role },
+          },
+        });
+        assert.equal(created.nativeThreadRef?.nativeId, SESSION);
+      }),
+  );
+
   const reconnected = (
     active: Record<string, unknown>,
     ended?: "succeeded",

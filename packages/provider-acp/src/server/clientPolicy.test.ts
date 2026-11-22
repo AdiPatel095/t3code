@@ -132,6 +132,28 @@ describe("acpPermissionDisposition", () => {
     }
   });
 
+  it("only allows read operations for a panel code agent", () => {
+    const readOnly: AcpRuntimePolicy = {
+      runtimeMode: "approval-required",
+      cwd,
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+    };
+    for (const role of ["panelist", "code_agent"] as const) {
+      const runtimePolicy = { ...readOnly, panel: { role } };
+      for (const kind of ["read", "search", "think"] as const) {
+        assert.equal(
+          acpPermissionDisposition(runtimePolicy, permissionRequest(kind)),
+          role === "panelist" ? "deny" : "allow",
+        );
+      }
+      for (const kind of ["edit", "delete", "move", "execute", "fetch", "other"] as const) {
+        assert.equal(acpPermissionDisposition(runtimePolicy, permissionRequest(kind)), "deny");
+      }
+      assert.equal(acpClientExecuteDisposition(runtimePolicy), "deny");
+    }
+  });
+
   it.effect("denies mutations through workspace symlinks that escape the writable roots", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -281,6 +303,24 @@ describe("acpMcpToolApprovalElicitationDisposition", () => {
       ),
       "allow",
     );
+    for (const role of ["panelist", "code_agent"] as const) {
+      const panelPolicy = {
+        ...approvalRequired,
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        panel: { role },
+      };
+      assert.equal(acpMcpToolApprovalElicitationDisposition(panelPolicy, tagged), "deny");
+      assert.equal(
+        acpMcpToolApprovalElicitationDisposition(
+          panelPolicy,
+          untagged,
+          "mcp_tool_call_approval_exec-123",
+        ),
+        "deny",
+      );
+      assert.isUndefined(acpMcpToolApprovalElicitationDisposition(panelPolicy, untagged));
+    }
     assert.isUndefined(
       acpMcpToolApprovalElicitationDisposition(fullAccess, {
         ...tagged,

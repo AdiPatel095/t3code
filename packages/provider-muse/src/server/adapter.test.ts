@@ -1152,6 +1152,62 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect.each(["panelist", "code_agent"] as const)(
+    "declines Muse permissions and dismisses user input during a panel %s turn",
+    (role) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakeMuse();
+        const panelPolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          ...runtimePolicy,
+          runtimeMode: "approval-required",
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+          panel: { role },
+        });
+        const harness = yield* makeHarness(
+          fake,
+          INSTANCE_ID,
+          undefined,
+          undefined,
+          undefined,
+          panelPolicy,
+        );
+        const { nativeId } = yield* startConversation(harness, fake);
+        yield* fake.emit("approval/requested", approval(nativeId));
+        const shellDecision = yield* fake.takeCall("approval/decide");
+        assert.equal(shellDecision.params.choiceId, "deny");
+        yield* fake.emit("approval/resolved", { approvalId: "approval-1", turnId: nativeId });
+
+        yield* fake.emit("approval/requested", {
+          ...approval(nativeId),
+          approvalId: "approval-read",
+          currentRequirementId: { approvalId: "approval-read", sourceIndex: 0 },
+          subject: { kind: "fileAccess", access: "read", path: "README.md" },
+        });
+        const readDecision = yield* fake.takeCall("approval/decide");
+        assert.equal(readDecision.params.approvalId, "approval-read");
+        assert.equal(readDecision.params.choiceId, "deny");
+
+        yield* fake.emit("userInput/requested", {
+          userInputId: "question-1",
+          turnId: nativeId,
+          questions: [],
+        });
+        assert.equal((yield* fake.takeCall("userInput/cancel")).params.userInputId, "question-1");
+        yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
+        yield* harness.takeEvent(
+          "provider_turn.updated",
+          (event) => event.providerTurn.status === "completed",
+        );
+        assert.isFalse(
+          harness.allEvents.some(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ),
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("lets a user turn take a held Muse report turn, approvals included", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
