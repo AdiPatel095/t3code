@@ -2804,12 +2804,13 @@ describe("storage cleanup reports and local file policies", () => {
           expect(fixture.sessionLiveChecks()).toBe(worktreeOnDelete ? 6 : 0);
 
           fixture.setSessionLive(true);
+          const { panel: _panel, ...deletedThread } = shell({ deletedAt: at(0) });
           yield* publish({
             id: EventId.make("event:thread:deleted"),
             type: "thread.deleted",
             threadId: ThreadId.make("thread-1"),
             occurredAt: at(0),
-            payload: { ...shell({ deletedAt: at(0) }), lastVisitedAt: null },
+            payload: { ...deletedThread, lastVisitedAt: null },
           });
           // Deletion always sweeps so the deleted thread's checkpoint refs are pruned.
           expect(fixture.snapshotReads()).toBe(startupReads + 2 * Number(worktreeOnDelete) + 1);

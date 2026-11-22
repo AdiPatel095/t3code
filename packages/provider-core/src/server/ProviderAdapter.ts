@@ -8,6 +8,7 @@ import {
   OrchestrationV2AppThread,
   OrchestrationV2ConversationMessage,
   OrchestrationV2ExecutionNode,
+  OrchestrationV2PanelRole,
   OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderSession,
   OrchestrationV2PlanArtifact,
@@ -67,6 +68,7 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   cwd: Schema.NullOr(Schema.String),
   approvalPolicy: Schema.optional(Schema.Unknown),
   sandboxPolicy: Schema.optional(Schema.Unknown),
+  panel: Schema.optional(Schema.Struct({ role: OrchestrationV2PanelRole })),
   /**
    * The administrator's ceiling, when a managed policy sets one. `runtimeMode` is already under
    * it; adapters use it to refuse native mode choices a user makes beside T3 Code's own.

@@ -391,6 +391,12 @@ export type OrchestrationV2CheckpointCapabilities =
 
 export const OrchestrationV2RuntimePolicyCapabilities = Schema.Struct({
   enforcement: Schema.Literals(["native", "client-boundary"]),
+  panelChat: Schema.optional(
+    Schema.Struct({
+      readOnly: Schema.Literals(["enforced", "declined"]),
+      panelistToolsRemoved: Schema.Boolean,
+    }),
+  ),
 });
 export type OrchestrationV2RuntimePolicyCapabilities =
   typeof OrchestrationV2RuntimePolicyCapabilities.Type;
@@ -472,6 +478,119 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+export const OrchestrationV2PanelRole = Schema.Literals(["panelist", "code_agent"]);
+export type OrchestrationV2PanelRole = typeof OrchestrationV2PanelRole.Type;
+
+export const OrchestrationV2PanelTurnKind = Schema.Literals(["reply", "lookup", "conclusion"]);
+export type OrchestrationV2PanelTurnKind = typeof OrchestrationV2PanelTurnKind.Type;
+
+export const OrchestrationV2PanelTurnOutcome = Schema.Literals([
+  "replied",
+  "passed",
+  "failed",
+  "limited",
+  "unavailable",
+  "timed_out",
+  "stopped",
+  "interrupted",
+]);
+export type OrchestrationV2PanelTurnOutcome = typeof OrchestrationV2PanelTurnOutcome.Type;
+
+export const OrchestrationV2PanelIdleReason = Schema.Literals([
+  "concluded",
+  "agreed",
+  "rounds_done",
+  "answered",
+  "stopped",
+  "interrupted",
+  "no_replies",
+]);
+export type OrchestrationV2PanelIdleReason = typeof OrchestrationV2PanelIdleReason.Type;
+
+export const OrchestrationV2PanelParticipant = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  role: OrchestrationV2PanelRole,
+  handle: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  driver: ProviderDriverKind,
+  modelSelection: ModelSelection,
+  toolsRemoved: Schema.Boolean,
+});
+export type OrchestrationV2PanelParticipant = typeof OrchestrationV2PanelParticipant.Type;
+
+export const OrchestrationV2PanelRequestRef = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("run"), runId: RunId }),
+  Schema.Struct({ type: Schema.Literal("message"), messageId: MessageId }),
+]);
+export type OrchestrationV2PanelRequestRef = typeof OrchestrationV2PanelRequestRef.Type;
+
+export const OrchestrationV2PanelQueuedTurn = Schema.Struct({
+  participantId: TrimmedNonEmptyString,
+  kind: OrchestrationV2PanelTurnKind,
+  round: NonNegativeInt,
+  askedBy: Schema.optional(TrimmedNonEmptyString),
+  request: Schema.optional(OrchestrationV2PanelRequestRef),
+});
+export type OrchestrationV2PanelQueuedTurn = typeof OrchestrationV2PanelQueuedTurn.Type;
+
+export const OrchestrationV2PanelRunOfRounds = Schema.Struct({
+  mode: Schema.Literals(["open", "addressed"]),
+  totalRounds: NonNegativeInt,
+  round: NonNegativeInt,
+  roundReplied: Schema.Boolean,
+  roundAllPassed: Schema.Boolean,
+  agreed: Schema.Boolean,
+  roundsCompleted: NonNegativeInt,
+});
+export type OrchestrationV2PanelRunOfRounds = typeof OrchestrationV2PanelRunOfRounds.Type;
+
+export const OrchestrationV2PanelCurrentTurn = Schema.Struct({
+  runId: RunId,
+  participantId: TrimmedNonEmptyString,
+  kind: OrchestrationV2PanelTurnKind,
+  round: NonNegativeInt,
+  timedOut: Schema.Boolean,
+});
+export type OrchestrationV2PanelCurrentTurn = typeof OrchestrationV2PanelCurrentTurn.Type;
+
+export const OrchestrationV2PanelState = Schema.Struct({
+  participants: Schema.Array(OrchestrationV2PanelParticipant),
+  rounds: PositiveInt,
+  status: Schema.Literals(["running", "idle"]),
+  idleReason: Schema.NullOr(OrchestrationV2PanelIdleReason),
+  run: Schema.NullOr(OrchestrationV2PanelRunOfRounds),
+  queue: Schema.Array(OrchestrationV2PanelQueuedTurn),
+  current: Schema.NullOr(OrchestrationV2PanelCurrentTurn),
+  pendingPost: Schema.NullOr(
+    Schema.Struct({
+      messageId: MessageId,
+      mentionedParticipantIds: Schema.Array(TrimmedNonEmptyString),
+    }),
+  ),
+  cursor: Schema.NullOr(TrimmedNonEmptyString),
+  lookupsThisRound: NonNegativeInt,
+  turnCount: NonNegativeInt,
+});
+export type OrchestrationV2PanelState = typeof OrchestrationV2PanelState.Type;
+
+export const OrchestrationV2PanelTurn = Schema.Struct({
+  participantId: TrimmedNonEmptyString,
+  kind: OrchestrationV2PanelTurnKind,
+  round: NonNegativeInt,
+  totalRounds: NonNegativeInt,
+  askedBy: Schema.optional(TrimmedNonEmptyString),
+  outcome: Schema.optional(OrchestrationV2PanelTurnOutcome),
+  outcomeDetail: Schema.optional(Schema.String.check(Schema.isMaxLength(4_096))),
+  lookup: Schema.optional(Schema.Literals(["requested", "limit_reached"])),
+});
+export type OrchestrationV2PanelTurn = typeof OrchestrationV2PanelTurn.Type;
+
+export const OrchestrationV2PanelShellSummary = Schema.Struct({
+  status: OrchestrationV2PanelState.fields.status,
+  idleReason: OrchestrationV2PanelState.fields.idleReason,
+});
+export type OrchestrationV2PanelShellSummary = typeof OrchestrationV2PanelShellSummary.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -492,6 +611,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  panel: Schema.optional(OrchestrationV2PanelState),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -827,6 +947,7 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  panelTurn: Schema.optional(OrchestrationV2PanelTurn),
   /** The JSON Schema of the result this run was asked to return as data. */
   outputSchema: Schema.optional(Schema.Record(Schema.String, Schema.Json)),
   /**
@@ -1505,6 +1626,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   nodeId: Schema.NullOr(NodeId),
   role: Schema.Literals(["user", "assistant", "system"]),
   text: Schema.String,
+  panelParticipantId: Schema.optional(TrimmedNonEmptyString),
   context: Schema.optional(OrchestrationMessageContext),
   attachments: Schema.Array(ChatAttachment),
   streaming: Schema.Boolean,
@@ -1857,6 +1979,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
     messageId: MessageId,
+    panelParticipantId: OrchestrationV2ConversationMessage.fields.panelParticipantId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
@@ -2365,6 +2488,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  panel: Schema.optional(OrchestrationV2PanelShellSummary),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2754,6 +2878,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
     messageId: MessageId,
+    panelParticipantId: OrchestrationV2ConversationMessage.fields.panelParticipantId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),

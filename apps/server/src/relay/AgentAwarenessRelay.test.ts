@@ -700,7 +700,7 @@ describe("AgentAwarenessRelay", () => {
         yield* relay.start();
         yield* Queue.take(pulls);
         yield* relay.publishThread(THREAD_ID);
-        const terminal = shell({ status });
+        const { panel: _panel, ...terminal } = shell({ status });
         yield* Ref.set(currentShell, terminal);
         yield* relay.publishThread(THREAD_ID);
         yield* TestClock.adjust("5 seconds");

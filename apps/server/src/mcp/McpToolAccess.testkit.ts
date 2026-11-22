@@ -68,6 +68,7 @@ export const idleThreadProjection = (
 ): OrchestrationV2ThreadProjection => {
   const {
     status: _status,
+    panel: _panel,
     activeRunId: _activeRunId,
     latestRunId: _latestRunId,
     pendingRuntimeRequest: _pendingRuntimeRequest,

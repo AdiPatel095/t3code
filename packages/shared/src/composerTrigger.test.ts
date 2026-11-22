@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   detectComposerTrigger,
+  parsePanelCommand,
   parseSideChatCommand,
   serializeComposerFileLink,
 } from "./composerTrigger.ts";
@@ -178,5 +179,20 @@ describe("parseSideChatCommand", () => {
     expect(parseSideChatCommand("/sidebar")).toBeNull();
     expect(parseSideChatCommand("/btwx")).toBeNull();
     expect(parseSideChatCommand("ask /side later")).toBeNull();
+  });
+});
+
+describe("parsePanelCommand", () => {
+  it("reads an optional topic after /panel", () => {
+    expect(parsePanelCommand("/panel")).toEqual({ topic: "" });
+    expect(parsePanelCommand("/panel topic text")).toEqual({ topic: "topic text" });
+    expect(parsePanelCommand("  /PANEL  how should we proceed?\nsecond line  ")).toEqual({
+      topic: "how should we proceed?\nsecond line",
+    });
+  });
+
+  it("requires /panel to be the whole command token at the start", () => {
+    expect(parsePanelCommand("/panelist")).toBeNull();
+    expect(parsePanelCommand("ask /panel later")).toBeNull();
   });
 });

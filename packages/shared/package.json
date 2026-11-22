@@ -279,6 +279,10 @@
       "types": "./src/composerTrigger.ts",
       "import": "./src/composerTrigger.ts"
     },
+    "./panelChat": {
+      "types": "./src/panelChat.ts",
+      "import": "./src/panelChat.ts"
+    },
     "./triagePrompt": {
       "types": "./src/triagePrompt.ts",
       "import": "./src/triagePrompt.ts"
