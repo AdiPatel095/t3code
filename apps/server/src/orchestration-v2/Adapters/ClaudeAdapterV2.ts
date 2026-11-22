@@ -661,6 +661,7 @@ export const ClaudeProviderCapabilitiesV2 = {
   },
   runtimePolicy: {
     enforcement: "native",
+    panelChat: { readOnly: "enforced", panelistToolsRemoved: true },
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
@@ -2317,6 +2318,7 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  readonly strictMcpConfig?: true;
   /** The thread's T3 MCP session holds the `device` capability. */
   readonly deviceToolsAvailable?: boolean;
   readonly tools?: ClaudeAgentSdkQueryTools;
@@ -2471,6 +2473,7 @@ export function makeClaudeQueryOptions(input: {
       : {}),
     ...(input.environment === undefined ? {} : { env: input.environment }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
+    ...(input.strictMcpConfig === true ? { strictMcpConfig: true } : {}),
     systemPrompt: {
       type: "preset" as const,
       preset: "claude_code" as const,
@@ -3534,6 +3537,7 @@ export interface ClaudeRuntimeQueryPolicy {
   readonly permissionMode: PermissionMode;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
+  readonly strictMcpConfig?: true;
   readonly allowDangerouslySkipPermissions?: true;
   readonly installPermissionCallback: boolean;
 }
@@ -3563,8 +3567,10 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
     sandboxPolicyKindForClaudeRuntimePolicy(runtimePolicy) === "readOnly"
       ? CLAUDE_READ_ONLY_ALLOWED_TOOLS
       : undefined;
+  const panelist = runtimePolicy.panel?.role === "panelist";
+  const tools = panelist ? [] : readOnlyTools;
   const allowedTools =
-    readOnlyTools !== undefined && readOnlyPolicyAllowsGlobalReads(runtimePolicy)
+    !panelist && readOnlyTools !== undefined && readOnlyPolicyAllowsGlobalReads(runtimePolicy)
       ? readOnlyTools
       : undefined;
   // acceptEdits approves edits before the callback; the callback must ask for everything else.
@@ -3575,22 +3581,14 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
         runtimePolicy.runtimeMode === "auto-accept-edits"
       : runtimePolicy.approvalPolicy !== "never");
 
-  if (permissionMode === "plan") {
-    return {
-      permissionMode,
-      ...(readOnlyTools === undefined ? {} : { tools: readOnlyTools }),
-      ...(allowedTools === undefined ? {} : { allowedTools }),
-      // Claude routes Plan-mode writes to the callback even in Auto or Full access.
-      installPermissionCallback: true,
-    };
-  }
-
   return {
     permissionMode,
-    ...(readOnlyTools === undefined ? {} : { tools: readOnlyTools }),
+    ...(tools === undefined ? {} : { tools }),
     ...(allowedTools === undefined ? {} : { allowedTools }),
+    ...(runtimePolicy.panel === undefined ? {} : { strictMcpConfig: true }),
     ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-    installPermissionCallback,
+    // Claude routes Plan-mode writes to the callback even in Auto or Full access.
+    installPermissionCallback: permissionMode === "plan" || installPermissionCallback,
   };
 }
 
@@ -3698,6 +3696,7 @@ function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
     permissionMode: policy.permissionMode,
     tools: policy.tools,
     allowedTools: policy.allowedTools,
+    strictMcpConfig: policy.strictMcpConfig,
     allowDangerouslySkipPermissions: policy.allowDangerouslySkipPermissions,
     installPermissionCallback: policy.installPermissionCallback,
   });
@@ -13329,6 +13328,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(mcpOverrides.mcpServers === undefined
               ? {}
               : { mcpServers: mcpOverrides.mcpServers }),
+            ...(queryPolicy.strictMcpConfig === true ? { strictMcpConfig: true } : {}),
             deviceToolsAvailable: mcpSession?.capabilities?.has("device") === true,
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
