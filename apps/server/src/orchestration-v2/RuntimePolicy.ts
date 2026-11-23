@@ -3,6 +3,7 @@ import {
   managedRuntimeModeCeilingMessage,
   ModelSelection,
   OrchestrationV2AppThread,
+  type OrchestrationV2PanelTurnKind,
   ProjectId,
   ProviderInstanceId,
   RuntimeMode,
@@ -72,6 +73,7 @@ export interface RuntimePolicyV2Shape {
   readonly resolve: (input: {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
+    readonly panelTurnKind?: OrchestrationV2PanelTurnKind;
   }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
 }
 
@@ -79,13 +81,38 @@ export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePol
   "t3/orchestration-v2/RuntimePolicy/RuntimePolicyV2",
 ) {}
 
+function withPanelPolicy(
+  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+  input: Parameters<RuntimePolicyV2Shape["resolve"]>[0],
+): ProviderAdapter.ProviderAdapterV2RuntimePolicy {
+  if (input.thread.panel === undefined) return policy;
+  return {
+    ...policy,
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    panel: {
+      role:
+        input.panelTurnKind === "reply" || input.panelTurnKind === "conclusion"
+          ? "panelist"
+          : "code_agent",
+    },
+  };
+}
+
 export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2, {
   resolve: Effect.fn("RuntimePolicyV2.resolve")(function (input) {
-    return Effect.succeed({
-      runtimeMode: input.thread.runtimeMode,
-      interactionMode: input.thread.interactionMode,
-      cwd: input.thread.worktreePath,
-    });
+    return Effect.succeed(
+      withPanelPolicy(
+        {
+          runtimeMode: input.thread.runtimeMode,
+          interactionMode: input.thread.interactionMode,
+          cwd: input.thread.worktreePath,
+        },
+        input,
+      ),
+    );
   }),
 });
 
@@ -200,13 +227,16 @@ export const layerFromProjectStore: Layer.Layer<
               ),
             ),
           );
-        return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
-          interactionMode: input.thread.interactionMode,
-          cwd,
-          ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
-          ...(workspace === undefined || workspace.folders.length === 0 ? {} : { workspace }),
-        });
+        return withPanelPolicy(
+          ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
+            interactionMode: input.thread.interactionMode,
+            cwd,
+            ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
+            ...(workspace === undefined || workspace.folders.length === 0 ? {} : { workspace }),
+          }),
+          input,
+        );
       }),
     });
   }),

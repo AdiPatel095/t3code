@@ -122,7 +122,8 @@ export function kiroPermissionDisposition(
   const offersOnce = request.options.some(
     (option) => option.kind === "allow_once" && option.optionId.trim().length > 0,
   );
-  return disposition === "allow" && !offersOnce ? "ask" : disposition;
+  if (disposition !== "allow" || offersOnce) return disposition;
+  return policy.panel === undefined ? "ask" : "deny";
 }
 
 export interface KiroAcpRuntimeInput extends Omit<

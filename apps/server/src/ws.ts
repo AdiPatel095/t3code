@@ -129,6 +129,7 @@ import * as McpSignIn from "./mcpApps/McpSignIn.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
+import * as PanelChatService from "./orchestration-v2/panel/PanelChatService.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -1454,6 +1455,7 @@ export const layerWsRpc = (
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
+        | PanelChatService.PanelChatService
         | FileSystem.FileSystem
         | ServerConfig.ServerConfig
         | ServerSettings.ServerSettingsService
@@ -2028,6 +2030,9 @@ export const layerWsRpc = (
                   : command.threadId,
             ...(command.type === "thread.fork" || command.type === "thread.merge_back"
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
+              : {}),
+            ...(command.type === "panel.create"
+              ? { "orchestration_v2.parent_thread_id": command.parentThreadId }
               : {}),
           }).pipe(
             Effect.andThen(

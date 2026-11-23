@@ -2724,6 +2724,167 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect.each(["panelist", "code_agent"] as const)(
+    "starts a read-only Codex panel thread for the %s role with MCP servers disabled",
+    (role) =>
+      Effect.gen(function* () {
+        const scenario = `panel-${role}`;
+        const threadId = ThreadId.make(`thread-${scenario}`);
+        const prompt = "Discuss the panel topic";
+        const sandboxPolicy = {
+          type: "readOnly",
+          access: { type: "fullAccess" },
+          networkAccess: false,
+        } as const;
+        const runtimePolicy = {
+          ...CODEX_TEST_RUNTIME_POLICY,
+          runtimeMode: "approval-required",
+          approvalPolicy: "never",
+          sandboxPolicy,
+          panel: { role },
+        } satisfies ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+        const replayToolConfig = {
+          ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+          ...(role === "panelist" ? CodexAdapterV2.CODEX_PANELIST_TOOL_OVERRIDES : {}),
+        };
+        const expectedToolConfig = {
+          ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+          ...(role === "panelist"
+            ? {
+                "features.shell_tool": false,
+                "features.unified_exec": false,
+                "features.view_image": false,
+                "features.multi_agent": false,
+                "features.image_generation": false,
+                "features.browser_use": false,
+                "features.computer_use": false,
+                "features.in_app_browser": false,
+                "features.apps": false,
+                "features.tool_suggest": false,
+                "features.skill_search": false,
+                "features.sleep_tool": false,
+                web_search: "disabled",
+                "tools.update_plan.enabled": false,
+              }
+            : {}),
+        };
+        const preamble = codexReplayPreamble({
+          nativeThreadId: `native-${scenario}`,
+          nativeTurnId: `turn-${scenario}`,
+          prompt,
+          turnPolicy: {
+            approvalPolicy: "never",
+            sandboxPolicy: { type: "readOnly", networkAccess: false },
+          },
+        });
+        const requests: Array<unknown> = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: "previous-native-thread",
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                label: "panel config/read",
+                frame: { id: 3, method: "config/read", params: { includeLayers: false } },
+              },
+              {
+                type: "emit_inbound",
+                label: "panel config/read",
+                frame: {
+                  id: 3,
+                  result: {
+                    config: {
+                      mcp_servers: {
+                        stdio: { command: "node" },
+                        remote: { url: "https://example.com/mcp" },
+                        ...(role === "code_agent" ? { "dotted.name": { command: "node" } } : {}),
+                      },
+                    },
+                    origins: {},
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: "panel thread/start",
+                frame: { id: 4, method: "thread/start", params: { config: replayToolConfig } },
+              },
+              withReplayRequestId(preamble[4]!, 4),
+              ...preamble.slice(5, 7).map((entry) => withReplayRequestId(entry, 5)),
+              ...preamble.slice(7),
+              {
+                type: "expect_outbound",
+                label: "unavailable config/read",
+                frame: { id: 6, method: "config/read", params: { includeLayers: false } },
+              },
+              {
+                type: "emit_inbound",
+                label: "unavailable config/read",
+                frame: { id: 6, error: { code: -32603, message: "Config unavailable" } },
+              },
+            ],
+          }),
+          () => Effect.void,
+          (method, params) =>
+            Effect.sync(() => {
+              if (method === "thread/start") requests.push(params);
+            }),
+        );
+        const providerThread = yield* harness.runtime.ensureThread({
+          threadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy,
+        });
+        assert.deepEqual(requests[1], {
+          cwd: runtimePolicy.cwd,
+          model: CODEX_TEST_MODEL_SELECTION.model,
+          config: {
+            ...expectedToolConfig,
+            [T3_THREAD_ENV_KEY]: threadId,
+            ...(role === "code_agent"
+              ? {
+                  mcp_servers: {
+                    stdio: { command: "node", enabled: false },
+                    remote: { url: "https://example.com/mcp", enabled: false },
+                    "dotted.name": { command: "node", enabled: false },
+                  },
+                }
+              : { "mcp_servers.stdio.enabled": false, "mcp_servers.remote.enabled": false }),
+          },
+        });
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
+            threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-${scenario}`),
+            text: prompt,
+          }),
+          runtimePolicy,
+        });
+        const configError = yield* harness.runtime
+          .ensureThread({ threadId, modelSelection: CODEX_TEST_MODEL_SELECTION, runtimePolicy })
+          .pipe(Effect.flip);
+        assert.propertyVal(configError.cause, "errorMessage", "Config unavailable");
+        assert.lengthOf(requests, 2);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   // regression: #36520 MCP servers can tell a delegate_task child from a user thread
   it.effect("starts delegate_task children with the subagent thread source", () =>
     Effect.gen(function* () {

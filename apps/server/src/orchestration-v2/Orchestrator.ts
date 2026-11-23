@@ -28,6 +28,7 @@ import {
   CommandId,
   type GuestMessageId,
   isCompactionCommandMessage,
+  isDelegatedAppThread,
   isDeliveredProviderTurn,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
@@ -57,6 +58,8 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2ModelSwitch,
+  type OrchestrationV2PanelState,
+  type OrchestrationV2PanelTurn,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
@@ -86,6 +89,14 @@ import {
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import {
+  PANEL_MAX_ROUNDS,
+  PANEL_MIN_ROUNDS,
+  PANEL_TEXT_MAX_CHARS,
+  panelCodeCallouts,
+  panelMentionedParticipantIds,
+  panelTitleSeed,
+} from "@t3tools/shared/panelChat";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { contextBoundaryOrdinal, isScheduledFreshRun } from "./contextBoundary.ts";
@@ -221,6 +232,14 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import {
+  classifyTurn,
+  openRunOfRounds,
+  recordPost,
+  recover,
+  settleTurn,
+  type PanelDecision,
+} from "./panel/PanelScheduler.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -639,6 +658,11 @@ export function threadHasUnfinishedWork(records: {
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
+    case "panel.create":
+    case "panel.open":
+    case "panel.post":
+    case "panel.continue":
+    case "panel.turn.settle":
     case "thread.create":
     case "thread.archive":
     case "thread.unarchive":
@@ -1546,18 +1570,24 @@ function providerThreadPredatesBoundary(
 function sessionsReleasedByFreshContext(
   projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">,
   activeProviderThread: OrchestrationV2ProviderThread | undefined,
+  allThreadSessions = false,
 ): ReadonlyArray<OrchestrationV2ProviderSession> {
   const sessionId = activeProviderThread?.providerSessionId ?? null;
   return projection.providerSessions.filter(
     (session) =>
-      session.id === sessionId &&
       session.status !== "stopped" &&
       session.status !== "error" &&
-      !session.capabilities.sessions.supportsMultipleProviderThreadsPerSession,
+      (allThreadSessions ||
+        (session.id === sessionId &&
+          !session.capabilities.sessions.supportsMultipleProviderThreadsPerSession)),
   );
 }
 
 const FRESH_CONTEXT_DETACH_REASON = "Started a fresh session.";
+
+function stoppedPanelState(panel: OrchestrationV2PanelState): OrchestrationV2PanelState {
+  return { ...panel, status: "idle", idleReason: "stopped", queue: [], pendingPost: null };
+}
 
 function uniqueSessions(
   sessions: ReadonlyArray<OrchestrationV2ProviderSession>,
@@ -1798,6 +1828,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(events, (existing) => [...existing, withId]);
         return withId;
       });
+
+  const emitPanelUpdated = Effect.fn("Orchestrator.emitPanelUpdated")(function* (
+    command: OrchestrationV2ServerCommand,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    thread: OrchestrationV2AppThread,
+    panel: OrchestrationV2PanelState,
+    now: DateTime.Utc,
+  ) {
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "panel.updated",
+      threadId: thread.id,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: { ...thread, panel, updatedAt: now },
+    });
+  });
 
   // Detaching kills background work running inside the provider process.
   // Probe even with an empty roster: Claude's native subagents never reach
@@ -4959,11 +5008,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       markUnreadVisitedAt = DateTime.subtract(latestRunCompletedAt, { milliseconds: 1 });
     }
+    const stoppedPanel =
+      command.type === "thread.archive" && thread.panel?.status === "running"
+        ? stoppedPanelState(thread.panel)
+        : undefined;
+    if (stoppedPanel !== undefined) {
+      yield* emitPanelUpdated(command, events, thread, stoppedPanel, now);
+    }
     const updatedThread: OrchestrationV2AppThread = (() => {
       switch (command.type) {
         case "thread.archive":
           return {
             ...thread,
+            ...(stoppedPanel === undefined ? {} : { panel: stoppedPanel }),
             archivedAt: now,
             titleRegeneration: null,
             guestShare: null,
@@ -5671,6 +5728,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ["runs", "attempts", "nodes", "subagents", "messages"],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
+      const panelRun = projection.runs.find((run) => run.id === stoppedPanel?.current?.runId);
+      if (panelRun !== undefined && isLiveRun(panelRun)) {
+        yield* dispatchRunInterrupt(
+          {
+            type: "run.interrupt",
+            commandId: command.commandId,
+            threadId: command.threadId,
+            runId: panelRun.id,
+            reason: "Thread archived.",
+          },
+          events,
+          effects,
+        );
+      }
       const emitEvent = emit(events, command);
       const activeRunIds = new Set(
         projection.runs
@@ -7151,6 +7222,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    panel?: {
+      readonly participantId: string;
+      readonly panelTurn: OrchestrationV2PanelTurn;
+      readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
+    },
   ) {
     // A compacted thread reads every run, but attempts, nodes, messages, provider turns and prompts
     // only for its recent runs and the runs this command names. An idle compaction reads in full:
@@ -7174,6 +7250,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         : undefined,
     );
+    if (projection.thread.panel !== undefined && panel === undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Update the app to post in a panel chat.",
+      });
+    }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -7216,6 +7299,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // Another provider is handed what ran since it last saw the thread, which can be older than
     // the compaction, so a provider switch reads the whole history.
     if (
+      panel === undefined &&
       activeProviderInstanceId !== undefined &&
       activeProviderInstanceId !==
         (command.modelSelection ?? projection.thread.modelSelection).instanceId
@@ -7451,6 +7535,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         0 &&
       !hasTitleSetBeforeFirstMessage(projection.thread, command.titleSeed);
     if (
+      panel === undefined &&
       !isNativeMaintenanceCommand(command) &&
       (seedsUntitledThread ||
         (command.createdBy === "user" &&
@@ -7987,6 +8072,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (shouldQueue) {
+      if (panel !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This panel chat is still stopping.",
+        });
+      }
       if (pendingMergeBackTransfers.length > 0) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -8414,23 +8506,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       activeProviderThread.providerInstanceId !== modelSelection.instanceId;
     // Account overlays share native history. Selection commands may already
     // have updated the app thread, so classify against the native thread's owner.
-    const providerSwitchPlan = isProviderSwitch
-      ? yield* providerSwitchService
-          .plan({
-            projection: {
-              ...projection,
-              thread: {
-                ...projection.thread,
-                modelSelection: {
-                  ...projection.thread.modelSelection,
-                  instanceId: activeProviderThread.providerInstanceId,
+    const providerSwitchPlan =
+      isProviderSwitch && panel === undefined
+        ? yield* providerSwitchService
+            .plan({
+              projection: {
+                ...projection,
+                thread: {
+                  ...projection.thread,
+                  modelSelection: {
+                    ...projection.thread.modelSelection,
+                    instanceId: activeProviderThread.providerInstanceId,
+                  },
                 },
               },
-            },
-            targetModelSelection: modelSelection,
-          })
-          .pipe(mapDispatchError(command))
-      : null;
+              targetModelSelection: modelSelection,
+            })
+            .pipe(mapDispatchError(command))
+        : null;
     const canResumeAcrossInstances =
       !freshContext &&
       isProviderSwitch &&
@@ -8443,13 +8536,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           session.status !== "stopped" &&
           session.status !== "error",
       ),
-      ...(freshContext ? sessionsReleasedByFreshContext(projection, activeProviderThread) : []),
+      ...(freshContext
+        ? sessionsReleasedByFreshContext(projection, activeProviderThread, panel !== undefined)
+        : []),
     ]);
     const sessionsToDetach: Array<OrchestrationV2ProviderSession> = [];
     for (const detaching of releasableSessions) {
       if (yield* sessionHasBackgroundWork(detaching, projection.providerThreads)) {
         // A schedule has nobody to wait or press Stop; like a queued fresh start, leave it running.
-        if (freshContext && command.scheduledTaskId !== undefined) continue;
+        if (panel !== undefined || (freshContext && command.scheduledTaskId !== undefined))
+          continue;
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -8467,16 +8563,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (!isProviderSwitch || freshContext)
     ) {
       const reusableProviderThread = freshContext ? undefined : activeProviderThread;
-      const adapter = yield* providerAdapters.get(modelSelection.instanceId).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorProviderAdapterError({
-              commandId: command.commandId,
-              providerInstanceId: modelSelection.instanceId,
-              cause,
-            }),
-        ),
-      );
+      const adapter =
+        panel?.adapter ??
+        (yield* providerAdapters.get(modelSelection.instanceId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorProviderAdapterError({
+                commandId: command.commandId,
+                providerInstanceId: modelSelection.instanceId,
+                cause,
+              }),
+          ),
+        ));
       const providerSessionId =
         reusableProviderThread?.providerSessionId ??
         (yield* mapDispatchError(command)(
@@ -8597,6 +8695,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...wakeWorkStartedAt(projection, command),
         ...(freshContext ? { freshContext: true } : {}),
+        ...(panel === undefined ? {} : { panelTurn: panel.panelTurn }),
         ...output,
       };
       const attempt: OrchestrationV2RunAttempt = {
@@ -8645,6 +8744,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         nodeId: rootNodeId,
         role: "user",
         text: dispatchText,
+        ...(panel === undefined ? {} : { panelParticipantId: panel.participantId }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
         streaming: false,
@@ -8680,6 +8780,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: command.messageId,
         inputIntent: "turn_start",
         text: dispatchText,
+        ...(panel === undefined ? {} : { panelParticipantId: panel.participantId }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
         ...(freshContext ? { freshContext: true } : {}),
@@ -12519,7 +12620,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
   const loadProjectionForCommand = <K extends ProjectionRecordField>(
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) =>
@@ -13378,7 +13479,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     let { thread } = input.projection;
     let recovery = thread.limitRecovery;
     const latest = latestExecutedRun(runs);
-    if (latest?.status === "failed") {
+    if (thread.panel === undefined && latest?.status === "failed") {
       const { turnItems } = yield* projectionStore
         .getThreadRecords(thread.id, ["turnItems"], {
           turnItemTypes: ["error"],
@@ -14459,6 +14560,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
     if (projection.thread.deletedAt !== null) return undefined;
+    if (projection.thread.panel?.status === "running") {
+      yield* emitPanelUpdated(
+        command,
+        events,
+        projection.thread,
+        stoppedPanelState(projection.thread.panel),
+        yield* DateTime.now,
+      );
+    }
     // Queued after the interrupt, since a thread's effects run in order.
     const stopDelegatedTasks =
       command.stopDelegatedTasks === false ||
@@ -15764,6 +15874,428 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }),
     );
 
+  const emitPanelUserMessage = Effect.fn("Orchestrator.emitPanelUserMessage")(function* (
+    command: OrchestrationV2ServerCommand,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    thread: OrchestrationV2AppThread,
+    message: {
+      readonly id: MessageId;
+      readonly text: string;
+      readonly creationSource: OrchestrationV2AppThread["creationSource"];
+    },
+    now: DateTime.Utc,
+  ) {
+    const emitEvent = emit(events, command);
+    yield* emitEvent({
+      type: "message.updated",
+      threadId: thread.id,
+      occurredAt: now,
+      payload: {
+        ...message,
+        threadId: thread.id,
+        runId: null,
+        nodeId: null,
+        role: "user",
+        createdBy: "user",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    yield* emitEvent({
+      type: "turn-item.updated",
+      threadId: thread.id,
+      occurredAt: now,
+      payload: {
+        createdBy: "user",
+        creationSource: message.creationSource,
+        id: idAllocator.derive.userTurnItem({ messageId: message.id }),
+        threadId: thread.id,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal({ thread }),
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "user_message",
+        messageId: message.id,
+        inputIntent: "turn_start",
+        text: message.text,
+        attachments: [],
+      },
+    });
+  });
+
+  const startPanelTurn = Effect.fn("Orchestrator.startPanelTurn")(function* (
+    command: OrchestrationV2ServerCommand,
+    projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+    decision: PanelDecision,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const { thread } = projection;
+    let { state, next } = decision;
+    while (next !== null && thread.archivedAt === null && thread.deletedAt === null) {
+      const { participantId, kind, round, askedBy } = next;
+      const participant = state.participants.find((candidate) => candidate.id === participantId);
+      // The thread lock keeps this ordinal identical to the one dispatchMessage allocates.
+      const runId = idAllocator.derive.run({
+        threadId: thread.id,
+        ordinal: nextRunOrdinal(projection),
+      });
+      const current = { runId, participantId, kind, round, timedOut: false };
+      const adapter =
+        participant === undefined
+          ? Option.none()
+          : yield* Effect.option(providerAdapters.get(participant.modelSelection.instanceId));
+      if (participant === undefined || Option.isNone(adapter)) {
+        ({ state, next } = settleTurn(
+          { ...state, current },
+          { participantId, kind, outcome: "unavailable", codeCallout: false },
+          runId,
+        ));
+        continue;
+      }
+      const turnCount = state.turnCount + 1;
+      yield* emitPanelUpdated(
+        command,
+        events,
+        thread,
+        { ...state, current, turnCount },
+        yield* DateTime.now,
+      );
+      yield* dispatchMessage(
+        {
+          type: "message.dispatch",
+          commandId: command.commandId,
+          threadId: thread.id,
+          messageId: MessageId.make(`message:panel:${thread.id}:turn:${turnCount}`),
+          text: "",
+          attachments: [],
+          modelSelection: participant.modelSelection,
+          freshContext: true,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "server",
+        },
+        events,
+        effects,
+        {
+          participantId,
+          adapter: adapter.value,
+          panelTurn: {
+            participantId,
+            kind,
+            round,
+            totalRounds: state.run?.totalRounds ?? 0,
+            ...(askedBy === undefined ? {} : { askedBy }),
+          },
+        },
+      );
+      return;
+    }
+    if (next === null && state !== thread.panel) {
+      yield* emitPanelUpdated(command, events, thread, state, yield* DateTime.now);
+    }
+  });
+
+  const dispatchPanelOpen = Effect.fn("Orchestrator.dispatchPanelOpen")(function* (
+    command: Extract<OrchestrationV2InternalCommand, { type: "panel.open" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const reject = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const firstPanelist = command.participants.find(
+      (participant) => participant.role === "panelist",
+    );
+    if (firstPanelist === undefined) return yield* reject("Add at least 2 models.");
+    if (
+      !Number.isInteger(command.rounds) ||
+      command.rounds < PANEL_MIN_ROUNDS ||
+      command.rounds > PANEL_MAX_ROUNDS
+    ) {
+      return yield* reject("Choose between 1 and 5 rounds.");
+    }
+    if ((yield* findThread(command.threadId)) !== null) {
+      return yield* new OrchestratorThreadAlreadyExistsError({
+        commandId: command.commandId,
+        threadId: command.threadId,
+      });
+    }
+    const parent = yield* findThread(command.parentThreadId);
+    if (
+      parent === null ||
+      parent.archivedAt !== null ||
+      parent.deletedAt !== null ||
+      parent.panel !== undefined ||
+      parent.lineage.sideChat ||
+      isDelegatedAppThread(parent) ||
+      (yield* projectionStore.getMessageCount(parent.id).pipe(mapDispatchError(command))) === 0
+    ) {
+      return yield* reject("Panel chats start after the first message.");
+    }
+    const sourceProjection = yield* projectionStore
+      .getThreadRecords(parent.id, ["runs", "providerThreads", "providerTurns", "attempts"])
+      .pipe(mapDispatchError(command));
+    if (orchestrationV2WorktreePending(parent.worktreePath, sourceProjection.runs)) {
+      return yield* reject("Start the panel chat once this thread's worktree is set up.");
+    }
+    const sourceRun = latestStableRun(sourceProjection);
+    const now = command.createdAt ?? (yield* DateTime.now);
+    const transferId = yield* idAllocator.allocate
+      .contextTransfer({
+        sourceThreadId: parent.id,
+        targetThreadId: command.threadId,
+        type: "fork",
+      })
+      .pipe(mapDispatchError(command));
+    const title = panelTitleSeed(command.topic);
+    const { targetThread, transfer } = yield* threadForkService
+      .plan({
+        sourceProjection,
+        sourceRun,
+        sourceProviderThread:
+          sourceRun === null ? undefined : providerThreadForRun(sourceProjection, sourceRun),
+        sourceTokenUsage:
+          sourceRun === null
+            ? undefined
+            : providerTurnForRun(sourceProjection, sourceRun)?.tokenUsage,
+        canonicalSourcePoint:
+          sourceRun === null
+            ? { threadId: parent.id }
+            : contextSourcePointForRun(sourceProjection, sourceRun),
+        transferId,
+        targetThreadId: command.threadId,
+        title,
+        sideChat: true,
+        createdBy: command.createdBy,
+        creationSource: command.creationSource,
+        createdAt: now,
+      })
+      .pipe(mapDispatchError(command));
+
+    const panel: OrchestrationV2PanelState = {
+      participants: command.participants,
+      rounds: command.rounds,
+      status: "idle",
+      idleReason: null,
+      run: null,
+      queue: [],
+      current: null,
+      pendingPost: null,
+      cursor: null,
+      lookupsThisRound: 0,
+      turnCount: 0,
+    };
+    const thread: OrchestrationV2AppThread = {
+      ...targetThread,
+      title,
+      titleRenamed: false,
+      titleRegeneration: { requestId: command.commandId, startedAt: now },
+      forkedFrom: null,
+      modelSelection: firstPanelist.modelSelection,
+      providerInstanceId: firstPanelist.modelSelection.instanceId,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      limitRecovery: null,
+      panel,
+    };
+    const emitEvent = emit(events, command);
+    yield* emitEvent({
+      type: "thread.created",
+      threadId: thread.id,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: thread,
+    });
+    yield* emitEvent({
+      type: "context-transfer.created",
+      threadId: thread.id,
+      providerInstanceId: transfer.sourceProviderInstanceId ?? thread.providerInstanceId,
+      occurredAt: now,
+      payload: transfer,
+    });
+    yield* emitPanelUserMessage(
+      command,
+      events,
+      thread,
+      {
+        id: command.topicMessageId,
+        text: command.topic,
+        creationSource: command.creationSource,
+      },
+      now,
+    );
+    yield* Ref.update(effects, (pending) => [
+      ...pending,
+      pendingThreadTitleGenerationEffect(command.commandId, thread.id, {
+        type: "initial",
+        messageId: command.topicMessageId,
+      }),
+    ]);
+    yield* startPanelTurn(command, { thread, runs: [] }, openRunOfRounds(panel), events, effects);
+  });
+
+  const dispatchPanelControl = Effect.fn("Orchestrator.dispatchPanelControl")(function* (
+    command: Extract<OrchestrationV2Command, { type: "panel.post" | "panel.continue" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const reject = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const projection = yield* loadProjectionForCommand(command, ["runs"]);
+    const { thread } = projection;
+    const { panel } = thread;
+    if (panel === undefined || thread.archivedAt !== null || thread.deletedAt !== null) {
+      return yield* reject("This panel chat is unavailable.");
+    }
+    if (command.type === "panel.continue") {
+      if (panel.status === "running") return yield* reject("This panel chat is already running.");
+      if (panel.current !== null) return yield* reject("This panel chat is still stopping.");
+      yield* startPanelTurn(command, projection, openRunOfRounds(panel), events, effects);
+      return;
+    }
+    const text = command.text.trim();
+    if (text.length === 0) return yield* reject("Enter a message.");
+    if (text.length > PANEL_TEXT_MAX_CHARS) {
+      return yield* reject("Keep panel messages under 8,000 characters.");
+    }
+    yield* emitPanelUserMessage(
+      command,
+      events,
+      thread,
+      {
+        id: command.messageId,
+        text,
+        creationSource: "server",
+      },
+      yield* DateTime.now,
+    );
+    const decision = recordPost(panel, {
+      messageId: command.messageId,
+      mentionedParticipantIds: panelMentionedParticipantIds(text, panel.participants),
+    });
+    yield* startPanelTurn(command, projection, decision, events, effects);
+  });
+
+  const dispatchPanelSettle = Effect.fn("Orchestrator.dispatchPanelSettle")(function* (
+    command: Extract<OrchestrationV2InternalCommand, { type: "panel.turn.settle" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const thread = yield* findThread(command.threadId);
+    if (thread?.panel === undefined || thread.deletedAt !== null) return;
+    const { panel } = thread;
+    const { trigger } = command;
+    if (trigger.type === "recovery") {
+      const recovered = recover(panel);
+      if (recovered !== panel) {
+        yield* emitPanelUpdated(command, events, thread, recovered, yield* DateTime.now);
+      }
+      return;
+    }
+
+    const projection = yield* loadProjectionForCommand(command, ["runs", "messages", "turnItems"], {
+      messageRunIds: [trigger.runId],
+      messageRoles: ["assistant"],
+      turnItemRunIds: [trigger.runId],
+      turnItemTypes: ["error"],
+    });
+    const run = projection.runs.find((candidate) => candidate.id === trigger.runId);
+    if (run?.panelTurn === undefined) return;
+    const current = panel.current?.runId === run.id ? panel.current : null;
+    const terminal = !isActiveRun(run) && run.status !== "queued";
+    if (trigger.type === "time_limit") {
+      if (thread.archivedAt !== null || terminal || current === null || current.timedOut) return;
+      yield* emitPanelUpdated(
+        command,
+        events,
+        thread,
+        {
+          ...panel,
+          current: { ...current, timedOut: true },
+        },
+        yield* DateTime.now,
+      );
+      return yield* dispatchRunInterrupt(
+        {
+          type: "run.interrupt",
+          commandId: command.commandId,
+          threadId: thread.id,
+          runId: run.id,
+          reason: "Panel reply time limit",
+        },
+        events,
+        effects,
+      );
+    }
+
+    if (!terminal || (current === null && run.panelTurn.outcome !== undefined)) return;
+    const { kind, participantId } = run.panelTurn;
+    const assistantText = projection.messages.map((message) => message.text).join("\n\n");
+    const { outcome, detail } = classifyTurn({
+      kind,
+      runStatus: run.status,
+      timedOut: current?.timedOut ?? false,
+      assistantText,
+      failure: latestRootProviderFailure(run, projection.turnItems),
+    });
+    const decision = settleTurn(
+      panel,
+      {
+        participantId,
+        kind,
+        outcome,
+        codeCallout:
+          outcome === "replied" &&
+          kind === "reply" &&
+          panel.participants.some(
+            (participant) => participant.id === participantId && participant.role === "panelist",
+          ) &&
+          panelCodeCallouts(assistantText).length > 0,
+      },
+      run.id,
+    );
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "run.updated",
+      threadId: thread.id,
+      runId: run.id,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...run,
+        panelTurn: {
+          ...run.panelTurn,
+          outcome,
+          ...(detail === undefined ? {} : { outcomeDetail: detail }),
+          ...(decision.lookup === undefined ? {} : { lookup: decision.lookup }),
+        },
+      },
+    });
+    if (current !== null) {
+      yield* startPanelTurn(command, projection, decision, events, effects);
+    }
+  });
+
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId>,
@@ -15795,6 +16327,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       | undefined;
     let updateDelegatedCompletionOnlyRunId: RunId | undefined;
     switch (command.type) {
+      case "panel.create":
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Panel chats are created through PanelChatService.",
+        });
+      case "panel.open":
+        yield* dispatchPanelOpen(command, events, effects);
+        break;
+      case "panel.post":
+      case "panel.continue":
+        yield* dispatchPanelControl(command, events, effects);
+        break;
+      case "panel.turn.settle":
+        cancelUnsettledEffects = yield* dispatchPanelSettle(command, events, effects);
+        break;
       case "thread.create": {
         yield* dispatchThreadCreate(command, events);
         const initialMessage = threadCreateInitialMessage(command);
@@ -15991,6 +16539,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "message.dispatch": {
         const thread = yield* refuseNativeSubagentMessage(command);
+        if (thread.panel !== undefined) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Update the app to post in a panel chat.",
+          });
+        }
         const guestSend =
           command.guestMessageId === undefined
             ? undefined
@@ -16596,6 +17151,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* skipsSourceLock
         ? dispatch
         : threadDispatch.withLock(command.sourceThreadId, dispatch);
+    }
+    if (command.type === "panel.open" && command.parentThreadId !== command.threadId) {
+      const target = yield* findThread(command.threadId);
+      const parent = target === null ? yield* findThread(command.parentThreadId) : null;
+      return yield* target !== null || parent?.lineage.sideChat === true
+        ? dispatch
+        : threadDispatch.withLock(command.parentThreadId, dispatch);
     }
     if (
       command.type === "thread.delete" ||

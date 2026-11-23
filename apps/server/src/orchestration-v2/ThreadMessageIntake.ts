@@ -15,6 +15,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import { isProviderSignOutPrompt } from "./CommandPolicy.ts";
+import * as PanelChat from "./panel/PanelChatService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -131,6 +132,21 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
   incoming: OrchestrationV2Command,
   sender: { readonly managesProviders: boolean },
 ) {
+  if (
+    incoming.type === "panel.create" ||
+    incoming.type === "panel.post" ||
+    incoming.type === "panel.continue"
+  ) {
+    const panels = yield* PanelChat.PanelChatService;
+    switch (incoming.type) {
+      case "panel.create":
+        return yield* panels.create(incoming);
+      case "panel.post":
+        return yield* panels.post(incoming);
+      case "panel.continue":
+        return yield* panels.continue(incoming);
+    }
+  }
   const command =
     incoming.type === "message.dispatch"
       ? yield* withGuestAttachments(incoming)

@@ -60,7 +60,11 @@ import {
   ThreadWorktreeRestore,
 } from "../workspace/restoreMissingWorktree.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import { layerNoTaskFolders, layerRealGit } from "./ProviderTurnStartService.testkit.ts";
+import {
+  layerNoTaskFolders,
+  layerPanelTurnStartDependencies,
+  layerRealGit,
+} from "./ProviderTurnStartService.testkit.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -165,6 +169,7 @@ function startWithMissingWorktree(
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const listLocalBranchNames = vi.fn(() => Effect.succeed(["feature/restore"]));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(layerPanelTurnStartDependencies),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -1331,6 +1336,7 @@ function makeLocalCommandHarness(input: {
     ),
   );
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(layerPanelTurnStartDependencies),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({

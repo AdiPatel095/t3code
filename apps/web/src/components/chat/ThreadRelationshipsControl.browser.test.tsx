@@ -67,6 +67,7 @@ vi.mock(import("../../state/use-atom-command"), () => ({
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 
 import { render } from "../../../test/render";
+import { __setClientSettingsForTests, getClientSettings } from "../../hooks/useSettings";
 import { isMacPlatform } from "../../lib/utils";
 import { selectThreadRightPanelState, useRightPanelStore } from "../../rightPanelStore";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
@@ -234,6 +235,59 @@ it("opens an idle child beside the thread, and in its place with the modifier", 
     expect(screen.router?.state.location.pathname).toBe("/local/omitted-child"),
   );
   expect(panel().surfaces).toHaveLength(1);
+});
+
+it.each([
+  ["side-chat", "Side chat", undefined],
+  ["panel-chat", "Panel chat", { status: "idle", idleReason: "concluded" }],
+])("opens a %s in the main view on Ctrl+click", async (id, title, panel) => {
+  setup();
+  using cleanup = new DisposableStack();
+  const previousSettings = getClientSettings();
+  cleanup.defer(() => __setClientSettingsForTests(previousSettings));
+  __setClientSettingsForTests({ ...previousSettings, sideThreadOpenTarget: "panel" });
+  using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+
+  const projection = makeThreadProjectionFixture();
+  const parentId = projection.thread.id;
+  state.projection = projection;
+  state.relatedShells = [
+    {
+      ...projection.thread,
+      id: ThreadId.make(id),
+      title,
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "fork",
+        sideChat: true,
+      },
+      ...(panel === undefined ? {} : { panel }),
+    },
+  ];
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={parentId}
+      showLineage={false}
+      showSideChats
+      showPanelChats
+    />,
+    { router: `/${environmentId}/${parentId}` },
+  );
+
+  await screen.getByRole("button", { name: new RegExp(title) }).click({ modifiers: ["Control"] });
+
+  await vi.waitFor(() =>
+    expect(screen.router?.state.location.pathname).toBe(`/${environmentId}/${id}`),
+  );
+  const parentRef = scopeThreadRef(environmentId, parentId);
+  expect(
+    selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, parentRef),
+  ).toMatchObject({
+    isOpen: false,
+    surfaces: [],
+  });
 });
 
 it("keeps focus on the list when Show more pages reveal the last rows", async () => {

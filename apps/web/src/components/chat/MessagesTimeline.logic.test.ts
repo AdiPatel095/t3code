@@ -1,3 +1,5 @@
+import { panelTimelineAnnotations } from "@t3tools/client-runtime/panel-chat";
+import type { OrchestrationV2PanelParticipant } from "@t3tools/contracts";
 import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
@@ -5226,5 +5228,276 @@ describe("workEntryReadOutput", () => {
         "/workspace/t3code",
       ),
     ).toBe("/workspace/t3code/src/app.ts\n~/.claude/CLAUDE.md\n~/.gitconfig");
+  });
+});
+
+describe("panel transcript rows", () => {
+  const speaker: OrchestrationV2PanelParticipant = {
+    id: "p1",
+    name: "Sol",
+    role: "panelist",
+    handle: "sol",
+    driver: ProviderDriverKind.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "sol" },
+    toolsRemoved: true,
+  };
+
+  function panelTimeline() {
+    const fixture = makeStreamingTimelineFixture("Partial reply");
+    const itemRows = fixture.visibleTurnItems.flatMap((row): OrchestrationV2ProjectedTurnItem[] => {
+      const { item } = row;
+      if (item.id === "live-user-item" && item.type === "user_message") {
+        return [
+          {
+            ...row,
+            item: {
+              ...item,
+              text: "",
+              panelParticipantId: speaker.id,
+              freshContext: true,
+              modelSwitch: {
+                from: { instanceId: ProviderInstanceId.make("claude"), model: "opus" },
+                to: speaker.modelSelection,
+              },
+            },
+          },
+        ];
+      }
+      if (item.id === "live-assistant-item") return [row];
+      if (item.id === "history-user-item" && item.type === "user_message") {
+        return [
+          { ...row, item: { ...item, runId: null, text: "Topic" } },
+          {
+            ...row,
+            item: {
+              ...item,
+              id: TurnItemId.make("post-item"),
+              runId: null,
+              messageId: MessageId.make("post"),
+              text: "A follow-up",
+              startedAt: DateTime.makeUnsafe(fixture.time(6)),
+            },
+            position: 4,
+          },
+        ];
+      }
+      return [];
+    });
+    return {
+      ...fixture,
+      entries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: itemRows.toSorted((left, right) => left.position - right.position),
+        optimisticMessages: [],
+      }),
+    };
+  }
+
+  it.each([false, true])(
+    "keeps the topic, first reply and later post in transcript order (working=%s)",
+    (isWorking) => {
+      const { base, threadId, historyRunId, runId, time } = makeStreamingTimelineFixture();
+      const codeAgent = {
+        ...speaker,
+        id: "code",
+        name: "Lookup model",
+        handle: "code",
+        role: "code_agent" as const,
+      };
+      const userItem = (
+        id: string,
+        run: RunId | null,
+        text: string,
+        ordinal: number,
+        at: number,
+      ) => ({
+        ...base(`turn-item:message:${encodeURIComponent(id)}`, runId, at),
+        type: "user_message" as const,
+        messageId: MessageId.make(id),
+        runId: run,
+        ordinal,
+        text,
+        attachments: [],
+        inputIntent: "turn_start" as const,
+        creationSource: id === "topic" ? ("web" as const) : ("server" as const),
+        ...(run === null
+          ? { createdBy: "user" as const }
+          : {
+              createdBy: "agent" as const,
+              panelParticipantId: run === historyRunId ? speaker.id : codeAgent.id,
+            }),
+      });
+      const replyItem = (id: string, run: RunId, text: string, ordinal: number, at: number) => ({
+        ...base(id, run, at),
+        type: "assistant_message" as const,
+        phase: "final_answer" as const,
+        messageId: MessageId.make(id),
+        ordinal,
+        text,
+        streaming: false,
+      });
+      const firstMarker = userItem(
+        `message:panel:${threadId}:turn:1`,
+        historyRunId,
+        "",
+        1_000_001,
+        1,
+      );
+      const nextMarker = userItem(`message:panel:${threadId}:turn:2`, runId, "", 2_000_001, 4);
+      const items = [
+        userItem("topic", null, "Topic", 1, 0),
+        firstMarker,
+        replyItem("first-reply", historyRunId, "First reply", 1_000_002, 2),
+        userItem("post", null, "A follow-up", 1_000_003, 3),
+        nextMarker,
+        {
+          ...replyItem("next-reply", runId, "Next reply", 2_000_002, 5),
+          ...(isWorking ? { status: "running" as const, streaming: true, completedAt: null } : {}),
+        },
+      ];
+      const entries = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: items.map((item, position) => ({
+          position,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        })),
+        optimisticMessages: [],
+      });
+      const annotations = panelTimelineAnnotations(
+        [historyRunId, runId].map((id, index) => ({
+          id,
+          ordinal: index + 1,
+          requestedAt: DateTime.makeUnsafe(time(index === 0 ? 1 : 4)),
+          panelTurn: {
+            participantId: index === 0 ? speaker.id : codeAgent.id,
+            kind: index === 0 ? "reply" : "lookup",
+            round: 1,
+            totalRounds: 1,
+            ...(index === 0 || !isWorking ? { outcome: "replied" as const } : {}),
+          },
+        })),
+        { participants: [speaker, codeAgent] },
+      );
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries: entries,
+        panelAnnotations: annotations,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        runningRunId: isWorking ? runId : null,
+        isWorking,
+      });
+      expect(
+        rows.flatMap((row) =>
+          row.kind === "message" ? [row.message.id] : row.kind === "panel-speaker" ? [row.id] : [],
+        ),
+      ).toEqual([
+        "topic",
+        `panel-speaker:${historyRunId}`,
+        "first-reply",
+        "post",
+        `panel-speaker:${runId}`,
+        "next-reply",
+      ]);
+      expect(
+        rows.flatMap((row) =>
+          row.kind === "message" && row.message.role === "assistant" ? [row.panelAuthor] : [],
+        ),
+      ).toEqual([speaker.name, "Code agent"]);
+    },
+  );
+
+  it("replaces fresh-session and model-switch markers, and keeps a queued post after its speaker's reply", () => {
+    const { runId, entries, time } = panelTimeline();
+    const annotations = panelTimelineAnnotations(
+      [
+        {
+          id: runId,
+          ordinal: 1,
+          requestedAt: DateTime.makeUnsafe(time(5)),
+          panelTurn: {
+            participantId: speaker.id,
+            kind: "reply",
+            round: 1,
+            totalRounds: 1,
+            outcome: "timed_out",
+          },
+        },
+      ],
+      { participants: [speaker] },
+    );
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      panelAnnotations: annotations,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      isWorking: false,
+    });
+    expect(
+      rows.map((row) =>
+        row.kind === "message"
+          ? row.message.text
+          : row.kind === "panel-divider"
+            ? row.line.label
+            : row.kind,
+      ),
+    ).toEqual([
+      "Topic",
+      "Round 1 of 1",
+      "panel-speaker",
+      "Partial reply",
+      "Sol was stopped after 2 minutes",
+      "A follow-up",
+    ]);
+    expect(rows.find((row) => row.kind === "panel-speaker")).toMatchObject({ speaker });
+    expect(
+      rows.some(
+        (row) =>
+          row.kind === "message" &&
+          row.projectedItem?.item.type === "user_message" &&
+          (row.projectedItem.item.freshContext || row.projectedItem.item.modelSwitch),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["conclusion", "replied", ["Conclusion", "panel-speaker", "Partial reply"]],
+    ["reply", "passed", ["panel-speaker", "Sol passed"]],
+  ] as const)("puts the %s annotation around its speaker", (kind, outcome, expected) => {
+    const { runId, entries, time } = panelTimeline();
+    const annotations = panelTimelineAnnotations(
+      [
+        {
+          id: runId,
+          ordinal: 1,
+          requestedAt: DateTime.makeUnsafe(time(5)),
+          panelTurn: {
+            participantId: speaker.id,
+            kind,
+            round: kind === "conclusion" ? 1 : 0,
+            totalRounds: kind === "conclusion" ? 1 : 0,
+            outcome,
+          },
+        },
+      ],
+      { participants: [speaker] },
+    );
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      panelAnnotations: annotations,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      isWorking: false,
+    });
+    const attributed = rows
+      .slice(1, -1)
+      .map((row) =>
+        row.kind === "message"
+          ? row.message.text
+          : row.kind === "panel-divider"
+            ? row.line.label
+            : row.kind,
+      );
+    expect(attributed).toEqual(expected);
   });
 });

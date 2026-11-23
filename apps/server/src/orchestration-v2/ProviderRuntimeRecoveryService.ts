@@ -424,22 +424,24 @@ export const make = Effect.gen(function* () {
           .map((message) => message.id),
       );
       // A saved user message the provider never accepted stays available through the held queue.
-      const retryableRuns = unstartedRuns.filter((run) =>
-        retryableMessageIds.has(run.userMessageId),
-      );
+      const retryableRuns =
+        projection.thread.panel === undefined
+          ? unstartedRuns.filter((run) => retryableMessageIds.has(run.userMessageId))
+          : [];
       // Nobody reviews a delegated, agent-sent or scheduled prompt, so it is sent again instead.
-      const unattendedRuns = continueAfterRestart
-        ? unstartedRuns.filter((run) =>
-            queuedMessages.some(
-              (message) =>
-                message.id === run.userMessageId &&
-                !retryableMessageIds.has(message.id) &&
-                message.notification === undefined &&
-                message.delegatedCompletion === undefined &&
-                (message.scheduledTaskId !== undefined || message.creationSource === "mcp"),
-            ),
-          )
-        : [];
+      const unattendedRuns =
+        continueAfterRestart && projection.thread.panel === undefined
+          ? unstartedRuns.filter((run) =>
+              queuedMessages.some(
+                (message) =>
+                  message.id === run.userMessageId &&
+                  !retryableMessageIds.has(message.id) &&
+                  message.notification === undefined &&
+                  message.delegatedCompletion === undefined &&
+                  (message.scheduledTaskId !== undefined || message.creationSource === "mcp"),
+              ),
+            )
+          : [];
       const resentRuns: Array<OrchestrationV2ThreadProjection["runs"][number]> = [];
       const resends: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
       for (const run of unattendedRuns) {

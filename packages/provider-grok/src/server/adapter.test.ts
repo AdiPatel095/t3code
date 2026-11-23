@@ -264,6 +264,49 @@ describe("Grok reasoning effort", () => {
   );
 });
 
+it.effect("answers Grok panel permissions under the supervised provider policy", () =>
+  Effect.gen(function* () {
+    const flavor = makeGrokAcpAdapterFlavor(
+      {
+        instanceId,
+        settings: DEFAULT_GROK_SETTINGS,
+        environment: {},
+        hostPlatform: yield* HostProcess.Platform,
+        selfInvocation: yield* resolveSelfInvocation(),
+      },
+      "/home/ada",
+    );
+    const disposition = flavor.permissionDisposition!;
+    const edit = {
+      sessionId: "session-1",
+      options: [],
+      toolCall: { toolCallId: "tool-1", kind: "edit" },
+    } as const;
+    const read = { ...edit, toolCall: { ...edit.toolCall, kind: "read" } } as const;
+    const auto = {
+      cwd: "/work",
+      runtimeMode: "auto",
+      interactionMode: "default",
+    } as const;
+    assert.equal(disposition(auto, edit), "ask");
+    assert.deepEqual(flavor.capabilities.runtimePolicy?.panelChat, {
+      readOnly: "declined",
+      panelistToolsRemoved: false,
+    });
+    for (const role of ["panelist", "code_agent"] as const) {
+      const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...auto,
+        runtimeMode: "approval-required",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        panel: { role },
+      });
+      assert.equal(disposition(policy, edit), "deny");
+      assert.equal(disposition(policy, read), role === "panelist" ? "deny" : "allow");
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("a steer reaches Grok as an interjection that carries its images", () =>
   Effect.gen(function* () {
     const requests: Array<{ readonly method: string; readonly params: unknown }> = [];

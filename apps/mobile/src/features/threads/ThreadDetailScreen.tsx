@@ -187,6 +187,7 @@ import { FreshSessionNotice } from "./FreshSessionNotice";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import { PanelControlBar } from "./PanelControlBar";
 import { ProviderSubagentBar } from "./ProviderSubagentBar";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
 import {
@@ -217,13 +218,23 @@ import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import { ThreadGuestShareBar } from "./ThreadGuestShareBar";
+import { ThreadPanelChatsRow } from "./ThreadPanelChatsRow";
 import { ThreadSideChatsRow } from "./ThreadSideChatsRow";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-scroll-position";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
 import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
-import type { OrchestrationV2ProviderSession } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProviderSession,
+  OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
+import {
+  panelTimelineAnnotations,
+  type PanelTimelineAnnotation,
+} from "@t3tools/client-runtime/panel-chat";
 import { voiceInputBlocksSubmission } from "@t3tools/client-runtime/voice-input";
+
+const EMPTY_PANEL_ANNOTATIONS: ReadonlyMap<RunId, PanelTimelineAnnotation> = new Map();
 
 export interface ThreadDetailScreenProps {
   readonly header?: React.ReactNode;
@@ -244,6 +255,9 @@ export interface ThreadDetailScreenProps {
   readonly selectedThread: EnvironmentThreadShell;
   /** Use this for detail reads; it stays null until queued creation reaches the server. */
   readonly selectedThreadDetailRef: ScopedThreadRef | null;
+  readonly panelProjection?:
+    | Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "messages">
+    | undefined;
   readonly contentPresentation: ThreadContentPresentation;
   readonly screenTone: StatusTone;
   readonly connectionError: string | null;
@@ -419,6 +433,15 @@ function ThreadDetailBody(
 ) {
   const gt = useGT();
   const messages = useMessages();
+  const { panelProjection } = props;
+  const panel = panelProjection?.thread.panel;
+  const isPanel = panel !== undefined || props.selectedThread.source.panel !== undefined;
+  const panelAnnotations =
+    panelProjection && panel
+      ? panelTimelineAnnotations(panelProjection.runs, panel, messages, panelProjection.messages)
+      : isPanel
+        ? EMPTY_PANEL_ANNOTATIONS
+        : undefined;
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const deviceType = useDeviceType();
   const workspace = useWorkspaceTabs();
@@ -824,6 +847,7 @@ function ThreadDetailBody(
     if (connectionStatus !== null && !props.draftMode) {
       return connectionStatus;
     }
+    if (isPanel) return null;
     // Before the request check: an agent stuck on an approval may also ignore Stop.
     if (runStop !== null && contentPresentationKind === "ready") {
       const unresponsive = runStop.state === "unresponsive";
@@ -959,6 +983,7 @@ function ThreadDetailBody(
   ]);
   // A queued-run edit, question or approval owns the composer, and its send carries no fresh session.
   const freshSessionAvailable =
+    !isPanel &&
     !props.draftMode &&
     props.canOperateThread &&
     props.queuedRunEdit === null &&
@@ -986,7 +1011,9 @@ function ThreadDetailBody(
     readonly requestId: RuntimeRequestId;
     readonly collapsed: boolean;
   } | null>(null);
-  const activeUserInputRequestId = props.activePendingUserInput?.requestId ?? null;
+  const activeUserInputRequestId = isPanel
+    ? null
+    : (props.activePendingUserInput?.requestId ?? null);
   const questionInFlow = Platform.OS === "android" && activeUserInputRequestId !== null;
   const composerSlotHidden =
     activeUserInputRequestId !== null || props.creationState?.kind === "failed";
@@ -1416,6 +1443,7 @@ function ThreadDetailBody(
 
   const canCiteAssistantText =
     props.composerDraftKey !== null &&
+    !isPanel &&
     !isProviderSubagent &&
     !composerSlotHidden &&
     !props.isSavingQueuedEdit &&
@@ -1540,6 +1568,7 @@ function ThreadDetailBody(
                   detailRef={props.selectedThreadDetailRef}
                   workspaceRoot={props.threadCwd}
                   feed={props.selectedThreadFeed}
+                  panelAnnotations={panelAnnotations}
                   pendingHandoff={props.pendingHandoff}
                   statusLines={statusLines}
                   worktreeSetup={props.worktreeSetup}
@@ -1553,7 +1582,7 @@ function ThreadDetailBody(
                   // A native subagent has no composer to edit a pending message in;
                   // Cancel on the edit banner would discard it.
                   onEditPendingMessage={
-                    isProviderSubagent || pendingMessageEditBlocked
+                    isPanel || isProviderSubagent || pendingMessageEditBlocked
                       ? null
                       : handleEditPendingMessage
                   }
@@ -1586,7 +1615,7 @@ function ThreadDetailBody(
                   onIsAtEndChange={setIsAtEnd}
                   skills={selectedProviderSkills}
                   onCiteAssistantText={canCiteAssistantText ? handleCiteAssistantText : undefined}
-                  onUseArtifactTemplate={handleUseArtifactTemplate}
+                  onUseArtifactTemplate={isPanel ? undefined : handleUseArtifactTemplate}
                 />
               </ColumnWidth>
             </WorkspaceMutationIdProvider>
@@ -1727,11 +1756,13 @@ function ThreadDetailBody(
                         />
                       </Animated.View>
                     ) : null}
-                    <UsageLimitRecoveryCard
-                      key={props.selectedThread.latestRun?.runId}
-                      thread={props.selectedThread}
-                      environmentId={props.environmentId}
-                    />
+                    {isPanel ? null : (
+                      <UsageLimitRecoveryCard
+                        key={props.selectedThread.latestRun?.runId}
+                        thread={props.selectedThread}
+                        environmentId={props.environmentId}
+                      />
+                    )}
                     <ChildThreadApprovals
                       threadRef={props.selectedThreadDetailRef}
                       maxHeight={pendingUserInputMaxHeight}
@@ -1741,10 +1772,16 @@ function ThreadDetailBody(
                       canOperateThread={props.canOperateThread}
                     />
                     {props.draftMode ? null : (
-                      <ThreadSideChatsRow
-                        environmentId={props.environmentId}
-                        threadId={props.selectedThread.id}
-                      />
+                      <>
+                        <ThreadSideChatsRow
+                          environmentId={props.environmentId}
+                          threadId={props.selectedThread.id}
+                        />
+                        <ThreadPanelChatsRow
+                          environmentId={props.environmentId}
+                          threadId={props.selectedThread.id}
+                        />
+                      </>
                     )}
                     {props.feedbackSubmissions.map((submission) => (
                       <ComposerFeedback
@@ -1756,7 +1793,7 @@ function ThreadDetailBody(
                     {freshSessionAvailable ? (
                       <FreshSessionNotice threadKey={selectedThreadKey} />
                     ) : null}
-                    {props.canOperateThread ? (
+                    {!isPanel && props.canOperateThread ? (
                       <ManagedRuntimeModeNotice
                         threadKey={selectedThreadKey}
                         threadRuntimeMode={props.selectedThread.runtimeMode}
@@ -1811,7 +1848,7 @@ function ThreadDetailBody(
                         />
                       </Animated.View>
                     ) : null}
-                    {props.activePendingApproval || props.activePendingUserInput ? (
+                    {!isPanel && (props.activePendingApproval || props.activePendingUserInput) ? (
                       <Animated.View
                         className="shrink-0 gap-3 px-4 pb-3"
                         style={
@@ -1876,7 +1913,7 @@ function ThreadDetailBody(
                 </View>
 
                 <View style={composerSlotHidden ? { display: "none" } : undefined}>
-                  {isProviderSubagent ? (
+                  {isPanel || isProviderSubagent ? (
                     <View
                       className="self-center px-3 pt-1.5"
                       style={{
@@ -1885,36 +1922,48 @@ function ThreadDetailBody(
                         paddingBottom: composerBottomInset + 6,
                       }}
                     >
-                      <ProviderSubagentBar
-                        provider={providerSubagentProvider ?? null}
-                        modelLabel={
-                          providerSubagentCatalogModel?.name ??
-                          formatModelSlugName(props.selectedThread.modelSelection.model)
-                        }
-                        effortLabel={formatModelSelectionEffort(
-                          props.selectedThread.modelSelection,
-                          providerSubagentProvider?.models,
-                          reportedModelSelection,
-                        )}
-                        status={props.providerSubagentStatus ?? null}
-                        inspect={
-                          providerSubagentProvider?.driver === "antigravity"
-                            ? {
-                                environmentId: props.environmentId,
-                                threadId: props.selectedThread.id,
-                              }
-                            : null
-                        }
-                        onOpenParent={
-                          props.selectedThread.lineage.parentThreadId === null
-                            ? null
-                            : () =>
-                                openLinkedThread({
-                                  environmentId: String(props.environmentId),
-                                  threadId: String(props.selectedThread.lineage.parentThreadId),
-                                })
-                        }
-                      />
+                      {isPanel ? (
+                        <PanelControlBar
+                          threadRef={{
+                            environmentId: props.environmentId,
+                            threadId: props.selectedThread.id,
+                          }}
+                          panel={panel}
+                          archived={props.selectedThread.archivedAt !== null}
+                          canOperate={props.canOperateThread}
+                        />
+                      ) : (
+                        <ProviderSubagentBar
+                          provider={providerSubagentProvider ?? null}
+                          modelLabel={
+                            providerSubagentCatalogModel?.name ??
+                            formatModelSlugName(props.selectedThread.modelSelection.model)
+                          }
+                          effortLabel={formatModelSelectionEffort(
+                            props.selectedThread.modelSelection,
+                            providerSubagentProvider?.models,
+                            reportedModelSelection,
+                          )}
+                          status={props.providerSubagentStatus ?? null}
+                          inspect={
+                            providerSubagentProvider?.driver === "antigravity"
+                              ? {
+                                  environmentId: props.environmentId,
+                                  threadId: props.selectedThread.id,
+                                }
+                              : null
+                          }
+                          onOpenParent={
+                            props.selectedThread.lineage.parentThreadId === null
+                              ? null
+                              : () =>
+                                  openLinkedThread({
+                                    environmentId: String(props.environmentId),
+                                    threadId: String(props.selectedThread.lineage.parentThreadId),
+                                  })
+                          }
+                        />
+                      )}
                     </View>
                   ) : (
                     <>

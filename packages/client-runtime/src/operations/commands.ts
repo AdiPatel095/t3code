@@ -257,6 +257,17 @@ export interface ForkSideChatInput extends CommandMetadata {
   readonly title?: string;
 }
 
+export type CreatePanelChatInput = CommandMetadata &
+  Pick<
+    Extract<OrchestrationV2Command, { type: "panel.create" }>,
+    "parentThreadId" | "threadId" | "participants" | "rounds" | "topicMessageId" | "topic"
+  >;
+
+export type PostToPanelInput = ThreadCommandInput & {
+  readonly messageId: MessageId;
+  readonly text: string;
+};
+
 export interface MergeThreadBackInput extends CommandMetadata {
   readonly sourceThreadId: ThreadId;
   readonly targetThreadId: ThreadId;
@@ -1145,6 +1156,59 @@ export const forkSideChat = Effect.fn("EnvironmentCommands.forkSideChat")(functi
     sourcePoint: { type: "latest_stable" },
     sideChat: true,
     ...(input.title === undefined ? {} : { title: input.title }),
+  });
+});
+
+export const createPanelChat = Effect.fn("EnvironmentCommands.createPanelChat")(function* (
+  input: CreatePanelChatInput,
+) {
+  return yield* resendAfterSocketLoss(
+    dispatch({
+      type: "panel.create",
+      commandId: yield* allocateCommandId(input),
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+      parentThreadId: input.parentThreadId,
+      threadId: input.threadId,
+      participants: input.participants,
+      rounds: input.rounds,
+      topicMessageId: input.topicMessageId,
+      topic: input.topic,
+    }),
+  );
+});
+
+export const postToPanel = Effect.fn("EnvironmentCommands.postToPanel")(function* (
+  input: PostToPanelInput,
+) {
+  return yield* resendAfterSocketLoss(
+    dispatch({
+      type: "panel.post",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      messageId: input.messageId,
+      text: input.text,
+    }),
+  );
+});
+
+export const continuePanel = Effect.fn("EnvironmentCommands.continuePanel")(function* (
+  input: ThreadCommandInput,
+) {
+  return yield* dispatch({
+    type: "panel.continue",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+  });
+});
+
+export const stopPanel = Effect.fn("EnvironmentCommands.stopPanel")(function* (
+  input: ThreadCommandInput,
+) {
+  return yield* dispatch({
+    type: "thread.stop",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
   });
 });
 

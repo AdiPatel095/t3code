@@ -9,6 +9,8 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
+import * as PanelChatService from "./orchestration-v2/panel/PanelChatService.ts";
+import * as PanelTurnReactor from "./orchestration-v2/panel/PanelTurnReactor.ts";
 import * as MilestoneHub from "./milestones/MilestoneHub.ts";
 import * as OrchestrationMilestones from "./milestones/OrchestrationMilestones.ts";
 // Effect wraps this raw Node HTTP server after its startup and write-error guards attach.
@@ -755,6 +757,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  PanelTurnReactor.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  PanelChatService.layer.pipe(
+    Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+  ),
   Layer.effectDiscard(
     Effect.gen(function* () {
       yield* (yield* OrchestrationMilestones.OrchestrationMilestones).start();
@@ -966,6 +972,7 @@ const layerMakeServer = Layer.unwrap(
     const tailscaleParked = yield* Deferred.make<void>();
     const cloudLinkParked = yield* Deferred.make<void>();
     const routesReady = yield* Deferred.make<void>();
+    const panelTurnsParked = yield* Deferred.make<void>();
     const layerLauncher = ServiceLauncherClient.layer;
 
     // fixPath rewrites PATH, so pin the launcher the shell chose before it does.
@@ -1368,6 +1375,15 @@ const layerMakeServer = Layer.unwrap(
       }),
     );
 
+    // Close the reactor before shutdown reconciliation writes cancelled runs.
+    const layerPanelTurns = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const reactor = yield* PanelTurnReactor.PanelTurnReactor;
+        yield* reactor.start();
+        yield* Deferred.succeed(panelTurnsParked, undefined);
+      }),
+    );
+
     const layerRuntimeServices = ServerRuntimeStartup.layerWithOptions({
       activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
       abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
@@ -1376,6 +1392,7 @@ const layerMakeServer = Layer.unwrap(
           Deferred.await(runtimeStateParked),
           Deferred.await(cloudLinkParked),
           Deferred.await(routesReady),
+          Deferred.await(panelTurnsParked),
           ...(config.tailscaleServeEnabled ? [Deferred.await(tailscaleParked)] : []),
         ],
         { concurrency: "unbounded" },
@@ -1397,6 +1414,7 @@ const layerMakeServer = Layer.unwrap(
       layerRuntimeState.pipe(Layer.provide(layerLauncher)),
       layerTailscaleServe,
       layerCloudDesiredLinkReconcile,
+      layerPanelTurns,
       HeapSnapshot.layer,
     );
 

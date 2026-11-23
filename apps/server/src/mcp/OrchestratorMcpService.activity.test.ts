@@ -5,6 +5,7 @@ import {
   type OrchestratorMcpThreadReadResult,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2PanelState,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -23,6 +24,7 @@ import * as Metric from "effect/Metric";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "vite-plus/test";
+import { it as effectIt } from "@effect/vitest";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -307,6 +309,175 @@ it("readThread preserves caller access errors and prefers activity-run status ov
     expect(missingCaller.message).toContain(`Unable to read thread ${parentThreadId}:`);
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
+
+effectIt.effect(
+  "readThread skips panel speaker markers across pages and labels historical replies",
+  () => {
+    const modelSelection = { instanceId: parentInstanceId, model: "gpt-5.4" };
+    const panel = {
+      participants: [
+        {
+          id: "p1",
+          role: "panelist",
+          handle: "gpt",
+          name: "GPT",
+          driver: codexDriver,
+          modelSelection,
+          toolsRemoved: true,
+        },
+        {
+          id: "code",
+          role: "code_agent",
+          handle: "code",
+          name: "GPT for code",
+          driver: codexDriver,
+          modelSelection,
+          toolsRemoved: true,
+        },
+      ],
+      rounds: 1,
+      status: "idle",
+      idleReason: "answered",
+      run: null,
+      queue: [],
+      current: null,
+      pendingPost: null,
+      cursor: "p1",
+      lookupsThisRound: 0,
+      turnCount: 3,
+    } satisfies OrchestrationV2PanelState;
+    const thread = {
+      ...baseThread({
+        threadId: parentThreadId,
+        title: "Panel",
+        instanceId: parentInstanceId,
+        model: "gpt-5.4",
+      }),
+      panel,
+    };
+    const runs = [
+      {
+        ...makeRun({ id: cancelledRunId, ordinal: 1, status: "completed" }),
+        panelTurn: { participantId: "p1", kind: "reply", round: 1, totalRounds: 1 },
+      },
+      {
+        ...makeRun({ id: activeRunId, ordinal: 3, status: "completed" }),
+        panelTurn: { participantId: "code", kind: "lookup", round: 1, totalRounds: 1 },
+      },
+    ] as unknown as OrchestrationV2ThreadProjection["runs"];
+    const projection = {
+      thread,
+      runs: [runs[1]!],
+      runtimeRequests: [],
+      providerTurns: [],
+      messages: [],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const row = (
+      position: number,
+      type: "user_message" | "assistant_message",
+      text: string,
+      runId: RunId | null,
+      panelParticipantId?: string,
+    ) => {
+      const itemId = TurnItemId.make(`turn-item-panel-${position}`);
+      return {
+        position,
+        visibility: "visible",
+        sourceThreadId: parentThreadId,
+        sourceItemId: itemId,
+        item: {
+          type,
+          id: itemId,
+          runId,
+          status: "completed",
+          title: null,
+          text,
+          messageId: MessageId.make(`message-panel-${position}`),
+          updatedAt: now,
+          ...(panelParticipantId === undefined ? {} : { panelParticipantId }),
+        },
+      };
+    };
+    const rows = [
+      row(0, "user_message", "The topic", null),
+      row(1, "user_message", "", cancelledRunId, "p1"),
+      row(2, "assistant_message", "Use one queue.", cancelledRunId),
+      row(3, "user_message", "", activeRunId, "p1"),
+      row(4, "user_message", "", activeRunId, "code"),
+      row(5, "assistant_message", "See queue.ts.", activeRunId),
+    ];
+    const layer = layerOrchestratorService.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getTimelinePage: (_threadId, { afterPosition = -1, beforePosition, itemId, limit }) => {
+              const matching = rows.filter(
+                (item) => itemId === undefined || item.sourceItemId === itemId,
+              );
+              const remaining = matching.filter(
+                (item) =>
+                  item.position > afterPosition &&
+                  (beforePosition === undefined || item.position < beforePosition),
+              );
+              const items =
+                beforePosition === undefined ? remaining.slice(0, limit) : remaining.slice(-limit);
+              return Effect.succeed({
+                items: items as unknown as OrchestrationV2ThreadProjection["visibleTurnItems"],
+                totalItems: rows.length,
+                hasMore:
+                  beforePosition === undefined
+                    ? remaining.length > limit
+                    : matching.some((item) => item.position >= beforePosition),
+                hasEarlier: beforePosition !== undefined && remaining.length > limit,
+              });
+            },
+            getThreadRecords: (_threadId, _fields, filter) =>
+              Effect.succeed({
+                ...projection,
+                runs: runs.filter((run) => filter?.runIds?.includes(run.id)),
+              }),
+            getProjectThreadRecords: () => Effect.succeed(projection),
+            getRunCount: () => Effect.succeed(runs.length),
+            getThreadShell: () => Effect.succeed(thread as unknown as OrchestrationV2ThreadShell),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+          NodeCrypto.layer,
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const scope = { ...makeScope(), thread: undefined };
+      const read = { threadId: parentThreadId, limit: 1 };
+      const first = yield* service.readThread(scope, read);
+      expect(first.items.map((item) => item.text)).toEqual(["The topic"]);
+      const reply = yield* service.readThread(scope, {
+        ...read,
+        afterPosition: first.nextPosition!,
+      });
+      expect(reply.items.map((item) => item.text)).toEqual(["[GPT (@gpt)] Use one queue."]);
+      const lookup = yield* service.readThread(scope, {
+        ...read,
+        afterPosition: reply.nextPosition!,
+      });
+      expect(lookup.items.map((item) => item.text)).toEqual(["[Code agent (@code)] See queue.ts."]);
+      expect(lookup.hasMore).toBe(false);
+      const backwards = yield* service.readThread(scope, {
+        ...read,
+        beforePosition: lookup.nextPosition!,
+      });
+      expect(backwards.items.map((item) => item.position)).toEqual([2]);
+      const hidden = yield* service.readThread(scope, { ...read, itemId: rows[1]!.sourceItemId });
+      expect(hidden.items).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it("readThread pages cut-off text without splitting an emoji across pages", async () => {
   const text = "a😀bc";

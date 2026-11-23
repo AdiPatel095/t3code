@@ -313,6 +313,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.pin-reordered":
     case "thread.active-reordered":
     case "thread.metadata-updated":
+    case "panel.updated":
     case "thread.pull-request-synced":
     case "thread.issue-synced":
     case "thread.runtime-mode-updated":
@@ -336,10 +337,14 @@ export function applyOrchestrationV2ProjectionEvent(
       // Lifecycle updates carry the run as it was when the turn started. What the run returned
       // is written by its own event, and an update without it must not take it away.
       const known = base.runs.find((run) => run.id === event.payload.id);
-      const run =
+      const withOutput =
         event.payload.output === undefined && known?.output !== undefined
           ? { ...event.payload, output: known.output }
           : event.payload;
+      const run =
+        withOutput.panelTurn?.outcome === undefined && known?.panelTurn?.outcome !== undefined
+          ? { ...withOutput, panelTurn: known.panelTurn }
+          : withOutput;
       const next = { ...base, runs: upsertEntity(base.runs, run) };
       const visible = { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
       const wasQueued = known?.status === "queued";

@@ -155,3 +155,8 @@ export function parseSideChatCommand(text: string): { prompt: string } | null {
   const match = /^\/(?:side|btw)(?:\s+([\s\S]*))?$/i.exec(text.trim());
   return match ? { prompt: match[1]?.trim() ?? "" } : null;
 }
+
+export function parsePanelCommand(text: string): { topic: string } | null {
+  const match = /^\/panel(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  return match ? { topic: match[1]?.trim() ?? "" } : null;
+}

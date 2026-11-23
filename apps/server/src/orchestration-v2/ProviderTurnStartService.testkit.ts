@@ -14,6 +14,8 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -27,6 +29,16 @@ export const layerNoTaskFolders = Layer.mock(TaskFolders.TaskFolders)({
   plan: () => Effect.succeed(null),
   find: () => Effect.succeed(null),
 });
+
+export const layerProviderRegistry = Layer.mock(ProviderRegistry.ProviderRegistry)({
+  getProviders: Effect.succeed([]),
+});
+
+export const layerPanelTurnStartDependencies = Layer.mergeAll(
+  Layer.mock(EventStore.EventStoreV2)({}),
+  ProviderAdapterRegistry.layerFromAdapters([]),
+  layerProviderRegistry,
+);
 
 export const layer = Layer.mergeAll(
   layerNoTaskFolders,

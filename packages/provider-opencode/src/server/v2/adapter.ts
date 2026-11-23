@@ -216,7 +216,10 @@ const OpenCode2ProviderCapabilities = {
     nativeItemIds: "strong",
     nativeRequestIds: "strong",
   },
-  runtimePolicy: { enforcement: "native" },
+  runtimePolicy: {
+    enforcement: "native",
+    panelChat: { readOnly: "enforced", panelistToolsRemoved: true },
+  },
 } satisfies OrchestrationV2ProviderCapabilities;
 
 type EventOf<T extends OpenCodeEvent["type"]> = Extract<OpenCodeEvent, { readonly type: T }>;
@@ -401,7 +404,7 @@ type TurnTerminal =
 type Rule = Permission.Rule;
 type RulesPolicy = Pick<
   ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  "runtimeMode" | "interactionMode" | "workspace"
+  "runtimeMode" | "interactionMode" | "workspace" | "approvalPolicy" | "sandboxPolicy" | "panel"
 >;
 type NativeForm = EventOf<"form.created">["data"]["form"];
 
@@ -437,14 +440,45 @@ export const t3McpServerName = Effect.fn("t3McpServerName")(function* (threadId:
   return `t3-code-${Hex.encode(digest).slice(0, 16)}`;
 });
 
-// Last match wins: deny all threads' T3 servers, then allow only this thread's.
-const mcpRules = (mcpServerName: string | null): ReadonlyArray<Rule> =>
-  mcpServerName === null
+const mcpRules = (
+  mcpServerName: string | null,
+  panel: RulesPolicy["panel"],
+): ReadonlyArray<Rule> => {
+  // OpenCode registers every MCP tool as <server>_<tool>.
+  if (panel !== undefined) return [rule("*_*", "deny")];
+  // Last match wins: deny all threads' T3 servers, then allow only this thread's.
+  return mcpServerName === null
     ? []
-    : [
-        { action: "t3-code-*", resource: "*", effect: "deny" },
-        { action: `${mcpServerName}_*`, resource: "*", effect: "allow" },
-      ];
+    : [rule("t3-code-*", "deny"), rule(`${mcpServerName}_*`, "allow")];
+};
+
+const panelRules = (policy: RulesPolicy): ReadonlyArray<Rule> => {
+  if (policy.panel === undefined) return [];
+  const sandbox = policy.sandboxPolicy;
+  const codeAgentCanRead =
+    policy.panel.role === "code_agent" &&
+    policy.approvalPolicy === "never" &&
+    typeof sandbox === "object" &&
+    sandbox !== null &&
+    "type" in sandbox &&
+    sandbox.type === "readOnly";
+  return [
+    rule("*", "deny"),
+    ...(codeAgentCanRead
+      ? [
+          rule("read", "allow"),
+          rule("glob", "allow"),
+          rule("grep", "allow"),
+          { action: "read", resource: "*.env", effect: "deny" as const },
+          { action: "read", resource: "*.env.*", effect: "deny" as const },
+          { action: "read", resource: "*.env.example", effect: "allow" as const },
+        ]
+      : []),
+    rule("shell", "deny"),
+    rule("edit", "deny"),
+    rule("external_directory", "deny"),
+  ];
+};
 
 const sessionRules = (
   policy: RulesPolicy,
@@ -472,7 +506,9 @@ const sessionRules = (
   // Plan edits are re-allowed only for plan paths; free-tier sessions refuse denied shell/read.
   ...(policy.interactionMode === "plan" ? [rule("edit", "deny")] : []),
   ...paths,
-  ...mcpRules(mcpServerName),
+  ...panelRules(policy),
+  ...mcpRules(mcpServerName, policy.panel),
+  ...(policy.panel?.role === "panelist" ? [rule("*", "deny")] : []),
 ];
 
 const sameRules = (left: ReadonlyArray<Rule> | undefined, right: ReadonlyArray<Rule>) =>

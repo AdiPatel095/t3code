@@ -1,3 +1,7 @@
+import type {
+  PanelTimelineAnnotation,
+  PanelTimelineLine,
+} from "@t3tools/client-runtime/panel-chat";
 import * as DateTime from "effect/DateTime";
 import { msg } from "gt-react";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
@@ -533,6 +537,19 @@ export type MessagesTimelineRow = MessagesTimelineRowContent & {
 
 type MessagesTimelineRowContent =
   | {
+      kind: "panel-speaker";
+      id: string;
+      createdAt: string | null;
+      speaker: PanelTimelineAnnotation["speaker"];
+      askedBy?: string;
+    }
+  | {
+      kind: "panel-divider";
+      id: string;
+      createdAt: string | null;
+      line: PanelTimelineLine;
+    }
+  | {
       kind: "worktree-setup";
       id: string;
       createdAt: string | null;
@@ -635,6 +652,7 @@ type MessagesTimelineRowContent =
       createdAt: string;
       message: ChatMessage;
       projectedItem?: OrchestrationV2ProjectedTurnItem;
+      panelAuthor?: string;
       showAssistantMeta: boolean;
       suppressEmptyResponse?: boolean;
       showAssistantCopyButton: boolean;
@@ -682,6 +700,7 @@ type MessagesTimelineRowContent =
       id: string;
       createdAt: string;
       text: string;
+      panelAuthor?: string;
     }
   | {
       kind: "mcp-app";
@@ -1608,9 +1627,153 @@ function deriveTimelineTurnFolds(
   });
 }
 
+function panelMarker(entry: TimelineEntry) {
+  const item = entry.kind === "message" ? entry.projectedItem?.item : undefined;
+  return item?.type === "user_message" && item.panelParticipantId !== undefined;
+}
+
+function panelEntryRunId(entry: TimelineEntry): RunId | null {
+  if (entry.kind === "event") return entry.projectedItem.item.runId;
+  if (entry.kind === "message") return entry.message.runId ?? null;
+  return timelineEntryRunId(entry);
+}
+
+function panelTimelineEntries(
+  entries: ReadonlyArray<TimelineEntry>,
+  annotations: ReadonlyMap<RunId, PanelTimelineAnnotation>,
+) {
+  const groups = new Map<RunId, TimelineEntry[]>();
+  const result: (TimelineEntry | TimelineEntry[])[] = [];
+  for (const entry of entries) {
+    const runId = panelEntryRunId(entry);
+    if (runId === null) {
+      result.push(entry);
+      continue;
+    }
+    const item =
+      entry.kind === "event"
+        ? entry.projectedItem.item
+        : entry.kind === "work"
+          ? entry.entry.projectedItem?.item
+          : undefined;
+    if (item?.type === "approval_request" || item?.type === "user_input_request") continue;
+    const annotation = annotations.get(runId);
+    if (
+      !panelMarker(entry) &&
+      (annotation?.passed || (annotation?.outcomeLine && timelineEntryFailedItem(entry)))
+    )
+      continue;
+    const group = groups.get(runId);
+    if (group !== undefined) group.push(entry);
+    else {
+      const next = [entry];
+      groups.set(runId, next);
+      result.push(next);
+    }
+  }
+  return result.flat();
+}
+
+function insertPanelRows(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  entries: ReadonlyArray<TimelineEntry>,
+  annotations: ReadonlyMap<RunId, PanelTimelineAnnotation>,
+  activeRunId: RunId | null,
+  resolve: MessageResolver,
+): MessagesTimelineRow[] {
+  const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+  const markers = new Set(entries.filter(panelMarker).map((entry) => entry.id));
+  const groups = new Map<RunId, MessagesTimelineRow[]>();
+  const result: (MessagesTimelineRow | MessagesTimelineRow[])[] = [];
+  for (const row of rows) {
+    const entry = entriesById.get(row.id);
+    const runId =
+      row.kind === "message" || row.kind === "assistant-meta"
+        ? (row.message.runId ?? null)
+        : row.kind === "working" || row.kind === "thinking"
+          ? activeRunId
+          : row.kind === "work"
+            ? (row.groupedEntries[0]?.runId ?? null)
+            : row.kind === "work-live"
+              ? (row.entry.runId ?? null)
+              : row.kind === "turn-fold" ||
+                  row.kind === "attempt-fold" ||
+                  row.kind === "work-toggle"
+                ? (row.runId ?? null)
+                : entry === undefined
+                  ? null
+                  : panelEntryRunId(entry);
+    const annotation = runId === null ? undefined : annotations.get(runId);
+    const marker = markers.has(row.id);
+    if (runId === null || annotation === undefined) {
+      if (!marker) result.push(row);
+      continue;
+    }
+    let group = groups.get(runId);
+    if (group === undefined) {
+      group = [];
+      groups.set(runId, group);
+      result.push(group);
+      const { roundStart, conclusion, speaker, askedBy } = annotation;
+      if (roundStart !== undefined) {
+        group.push({
+          kind: "panel-divider",
+          id: `panel-round:${runId}`,
+          createdAt: row.createdAt,
+          line: { label: resolve(msg("Round {round} of {total}", roundStart)) },
+        });
+      }
+      if (conclusion) {
+        group.push({
+          kind: "panel-divider",
+          id: `panel-conclusion:${runId}`,
+          createdAt: row.createdAt,
+          line: { label: resolve(msg("Conclusion")) },
+        });
+      }
+      group.push({
+        kind: "panel-speaker",
+        id: `panel-speaker:${runId}`,
+        createdAt: row.createdAt,
+        speaker,
+        ...(askedBy === undefined ? {} : { askedBy }),
+      });
+    }
+    if (marker) continue;
+    if (
+      (row.kind === "message" && row.message.role === "assistant") ||
+      row.kind === "sent-message"
+    ) {
+      const { speaker } = annotation;
+      const panelAuthor = speaker.role === "code_agent" ? resolve(msg("Code agent")) : speaker.name;
+      group.push({ ...row, panelAuthor });
+    } else {
+      group.push(row);
+    }
+  }
+
+  for (const [runId, group] of groups) {
+    const annotation = annotations.get(runId);
+    for (const [kind, line] of [
+      ["outcome", annotation?.outcomeLine],
+      ["lookup", annotation?.lookupLine],
+    ] as const) {
+      if (line === undefined) continue;
+      group.push({
+        kind: "panel-divider",
+        id: `panel-${kind}:${runId}`,
+        line,
+        createdAt: group.at(-1)?.createdAt ?? null,
+      });
+    }
+  }
+  return result.flat();
+}
+
 export function deriveMessagesTimelineRows(
   input: {
     timelineEntries: ReadonlyArray<TimelineEntry>;
+    panelAnnotations?: ReadonlyMap<RunId, PanelTimelineAnnotation> | undefined;
     pendingApprovalRequestIds?: ReadonlySet<RuntimeRequestId>;
     latestRun?: TimelineLatestRun | null;
     /** The usage-limited run whose failure row the recovery notice replaces. */
@@ -1633,7 +1796,11 @@ export function deriveMessagesTimelineRows(
   },
   resolve: MessageResolver = m,
 ): MessagesTimelineRow[] {
-  const timelineEntries = timelineRowEntries(input);
+  const visibleEntries = timelineRowEntries(input);
+  const timelineEntries =
+    input.panelAnnotations === undefined
+      ? visibleEntries
+      : panelTimelineEntries(visibleEntries, input.panelAnnotations);
   const embeddedResultRunIds = new Set<RunId>();
   for (const entry of timelineEntries) {
     if ((entry.kind === "html-render" || entry.kind === "mcp-app") && entry.runId !== null) {
@@ -1738,7 +1905,9 @@ export function deriveMessagesTimelineRows(
     (entry.runId == null ? runlessWorkActive : entry.runId === unsettledRunId);
 
   const activeTurnHeaderIndex = input.isWorking
-    ? lastResponseBoundaryIndex(timelineEntries) + 1
+    ? (input.panelAnnotations === undefined
+        ? lastResponseBoundaryIndex(timelineEntries)
+        : timelineEntries.findLastIndex(panelMarker)) + 1
     : timelineEntries.length;
 
   const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
@@ -2431,9 +2600,19 @@ export function deriveMessagesTimelineRows(
     }
   }
 
-  const result = attachTrailingToolGroupsToAssistant(
+  const ordinaryRows = attachTrailingToolGroupsToAssistant(
     attachCreatedThreadSummaries(nextRows, timelineEntries, collapsedFoldMemberIds),
   );
+  const result =
+    input.panelAnnotations === undefined
+      ? ordinaryRows
+      : insertPanelRows(
+          ordinaryRows,
+          timelineEntries,
+          input.panelAnnotations,
+          unsettledRunId,
+          resolve,
+        );
   return result.map((row, index) => {
     if (timelineRowIsWorkLog(row) && timelineRowIsWorkLog(result[index + 1])) {
       return { ...row, continuesWorkLog: true };
@@ -2781,6 +2960,16 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "panel-speaker": {
+      const next = b as typeof a;
+      return (
+        a.createdAt === next.createdAt && a.speaker === next.speaker && a.askedBy === next.askedBy
+      );
+    }
+    case "panel-divider": {
+      const next = b as typeof a;
+      return a.createdAt === next.createdAt && shallow(a.line, next.line);
+    }
     case "working":
       return (
         a.createdAt === (b as typeof a).createdAt && a.compacting === (b as typeof a).compacting
@@ -2854,7 +3043,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "sent-message": {
       const bs = b as typeof a;
-      return a.createdAt === bs.createdAt && a.text === bs.text;
+      return a.createdAt === bs.createdAt && a.text === bs.text && a.panelAuthor === bs.panelAuthor;
     }
 
     case "mcp-app": {
@@ -2915,6 +3104,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return (
         a.message === bm.message &&
         a.projectedItem === bm.projectedItem &&
+        a.panelAuthor === bm.panelAuthor &&
         a.showAssistantMeta === bm.showAssistantMeta &&
         a.suppressEmptyResponse === bm.suppressEmptyResponse &&
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&

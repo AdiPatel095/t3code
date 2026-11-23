@@ -68,6 +68,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -87,7 +88,7 @@ import { PULL_REQUEST_WATCH_WAKE_LIMIT } from "./pullRequestWatch.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
-import { layerNoTaskFolders } from "./ProviderTurnStartService.testkit.ts";
+import { layerNoTaskFolders, layerProviderRegistry } from "./ProviderTurnStartService.testkit.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -143,6 +144,23 @@ const layerGitWorkflowTest = Layer.merge(
 );
 const layerProjectServiceTest = Layer.mock(ProjectService.ProjectService)({
   getById: () => Effect.succeedNone,
+});
+const layerPanelProviderRegistry = Layer.mock(ProviderRegistry.ProviderRegistry)({
+  getProviders: Effect.succeed([
+    {
+      instanceId: modelSelection.instanceId,
+      driver: ProviderDriverKind.make("codex"),
+      status: "error",
+      enabled: true,
+      installed: false,
+      auth: { status: "unknown" },
+      checkedAt: "1970-01-01T00:00:00.000Z",
+      version: null,
+      models: [],
+      slashCommands: [],
+      skills: [],
+    },
+  ]),
 });
 
 const driver = ProviderDriverKind.make("codex");
@@ -350,7 +368,7 @@ const layerProjectionReplayTest = ProjectionReplay.layer.pipe(
   ),
 );
 
-const layerTest = Layer.mergeAll(
+const layerRuntimeTest = Layer.mergeAll(
   RuntimeLayer.layer,
   layerProjectionReplayTest,
   RuntimeLayer.layerEventSink,
@@ -370,8 +388,10 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
 );
+const layerTest = layerRuntimeTest.pipe(Layer.provide(layerProviderRegistry));
 
 const layerLegacyImportTest = Layer.merge(RuntimeLayer.layer, layerProjectionReplayTest).pipe(
+  Layer.provide(layerProviderRegistry),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
   Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -476,6 +496,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
   ProjectionStore.layer,
   ThreadCommandExecutor.layer,
 ).pipe(
+  Layer.provide(layerProviderRegistry),
   Layer.provide(
     Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
       peek: () =>
@@ -1354,6 +1375,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   RuntimeLayer.layerEventSink,
   RuntimeLayer.layerEventInfrastructure,
 ).pipe(
+  Layer.provide(layerProviderRegistry),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
       normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
@@ -1389,6 +1411,83 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
+);
+
+it.layer(layerRuntimeTest.pipe(Layer.provide(layerPanelProviderRegistry)))(
+  "panel turn startup",
+  (it) => {
+    it.effect("uses the provider snapshot registry when starting a panel turn", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-runtime-panel-" });
+        const parentThreadId = ThreadId.make("runtime-panel-parent");
+        const threadId = ThreadId.make("runtime-panel");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("runtime-panel-parent-create"),
+          createdBy: "user",
+          creationSource: "web",
+          threadId: parentThreadId,
+          projectId: ProjectId.make("runtime-panel-project"),
+          title: "Panel parent",
+          modelSelection,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("runtime-panel-parent-message"),
+          createdBy: "user",
+          creationSource: "web",
+          threadId: parentThreadId,
+          messageId: MessageId.make("runtime-panel-parent-message"),
+          text: "Parent conversation",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        yield* orchestrator.dispatch({
+          type: "panel.open",
+          commandId: CommandId.make("runtime-panel-open"),
+          createdBy: "user",
+          creationSource: "web",
+          parentThreadId,
+          threadId,
+          participants: [
+            {
+              id: "p1",
+              role: "panelist",
+              name: "Codex",
+              handle: "codex",
+              driver,
+              modelSelection,
+              toolsRemoved: true,
+            },
+            {
+              id: "p2",
+              role: "panelist",
+              name: "Codex alternate",
+              handle: "alternate",
+              driver,
+              modelSelection: { ...modelSelection, instanceId: alternateInstanceId },
+              toolsRemoved: true,
+            },
+          ],
+          rounds: 1,
+          topicMessageId: MessageId.make("runtime-panel-topic"),
+          topic: "Panel topic",
+        });
+        yield* worker.drain();
+        const { turnItems } = yield* orchestrator.getThreadRecords(threadId, ["turnItems"]);
+        const failure = turnItems.find((item) => item.type === "error")?.failure;
+        assert.equal(failure?.code, "panel_participant_unavailable");
+        assert.equal(failure?.message, "Provider executable is not installed.");
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  },
 );
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
@@ -14192,6 +14291,7 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   EffectOutbox.layer,
   ThreadCommandExecutor.layer,
 ).pipe(
+  Layer.provide(layerProviderRegistry),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
   Layer.provide(SqlitePersistence.layerMemory),

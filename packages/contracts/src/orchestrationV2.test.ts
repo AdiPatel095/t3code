@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 
 import {
   EnvironmentId,
@@ -13,12 +14,15 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThreadJson,
   OrchestrationV2CheckpointFileSummary,
+  OrchestrationV2ConversationMessageJson,
   repositoryRewindCheckpoint,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2RunJson,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
@@ -336,6 +340,13 @@ describe("orchestration V2 contracts", () => {
       runtimePolicy: { enforcement: "native" },
     });
     expect(explicit.runtimePolicy).toEqual({ enforcement: "native" });
+
+    const panelChat = { readOnly: "enforced", panelistToolsRemoved: true };
+    const panelProvider = decodeOrchestrationV2ProviderCapabilities({
+      ...legacyCapabilities,
+      runtimePolicy: { enforcement: "native", panelChat },
+    });
+    expect(panelProvider.runtimePolicy).toEqual({ enforcement: "native", panelChat });
   });
 
   it.each(["  indented prompt\n", "\n \t\n"])(
@@ -465,6 +476,214 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+});
+
+describe("panel contract compatibility", () => {
+  const timestamp = DateTime.formatIso(now);
+  const modelSelection = { instanceId: "codex", model: "gpt-5.4" };
+  const thread = {
+    id: "panel-thread",
+    projectId: "project-1",
+    title: "Panel topic",
+    providerInstanceId: "codex",
+    modelSelection,
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: {
+      rootThreadId: "parent-thread",
+      parentThreadId: "parent-thread",
+      relationshipToParent: "fork",
+      sideChat: true,
+    },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "web",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    archivedAt: null,
+    deletedAt: null,
+  };
+
+  it("round-trips panel state and accepts threads without it", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+    const encode = Schema.encodeSync(OrchestrationV2AppThreadJson);
+    const panel = {
+      participants: [
+        {
+          id: "p1",
+          role: "panelist",
+          handle: "sol",
+          name: "GPT-5.4",
+          driver: "codex",
+          modelSelection,
+          toolsRemoved: true,
+        },
+        {
+          id: "p2",
+          role: "panelist",
+          handle: "opus",
+          name: "Claude Opus",
+          driver: "claude",
+          modelSelection: { instanceId: "claudeAgent", model: "claude-opus-4-5" },
+          toolsRemoved: true,
+        },
+      ],
+      rounds: 2,
+      status: "running",
+      idleReason: null,
+      run: {
+        mode: "open",
+        totalRounds: 2,
+        round: 1,
+        roundReplied: false,
+        roundAllPassed: true,
+        agreed: false,
+        roundsCompleted: 0,
+      },
+      queue: [{ participantId: "p2", kind: "reply", round: 1 }],
+      current: {
+        runId: "panel-run",
+        participantId: "p1",
+        kind: "reply",
+        round: 1,
+        timedOut: false,
+      },
+      pendingPost: { messageId: "panel-post", mentionedParticipantIds: ["p2"] },
+      cursor: null,
+      lookupsThisRound: 0,
+      turnCount: 1,
+    };
+
+    expect(decode(thread)).not.toHaveProperty("panel");
+    const decoded = decode({ ...thread, panel });
+    expect(decoded.panel).toEqual(panel);
+    expect(decode(encode(decoded))).toEqual(decoded);
+  });
+
+  it("round-trips panel turn metadata and accepts runs without it", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2RunJson);
+    const encode = Schema.encodeSync(OrchestrationV2RunJson);
+    const run = {
+      id: "panel-run",
+      threadId: thread.id,
+      ordinal: 1,
+      providerInstanceId: thread.providerInstanceId,
+      modelSelection,
+      providerThreadId: null,
+      userMessageId: "panel-marker",
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "completed",
+      requestedAt: timestamp,
+      startedAt: timestamp,
+      completedAt: timestamp,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    const panelTurn = {
+      participantId: "p1",
+      kind: "reply",
+      round: 1,
+      totalRounds: 2,
+      outcome: "replied",
+      lookup: "requested",
+    };
+
+    expect(decode(run)).not.toHaveProperty("panelTurn");
+    const decoded = decode({ ...run, panelTurn });
+    expect(decoded.panelTurn).toEqual(panelTurn);
+    expect(decode(encode(decoded))).toEqual(decoded);
+  });
+
+  it("round-trips the participant marker on messages and stored and wire user items", () => {
+    const marker = {
+      id: "panel-marker",
+      threadId: thread.id,
+      runId: "panel-run",
+      nodeId: null,
+      role: "user",
+      createdBy: "agent",
+      creationSource: "server",
+      text: "",
+      attachments: [],
+      streaming: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const panelParticipantId = "p1";
+    const decodeMessage = Schema.decodeUnknownSync(OrchestrationV2ConversationMessageJson);
+    const encodeMessage = Schema.encodeSync(OrchestrationV2ConversationMessageJson);
+    expect(decodeMessage(marker)).not.toHaveProperty("panelParticipantId");
+    const decoded = decodeMessage({ ...marker, panelParticipantId });
+    expect(decoded.panelParticipantId).toBe(panelParticipantId);
+    expect(decodeMessage(encodeMessage(decoded))).toEqual(decoded);
+
+    const item = {
+      id: "panel-marker-item",
+      messageId: marker.id,
+      threadId: marker.threadId,
+      runId: marker.runId,
+      nodeId: marker.nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: timestamp,
+      type: "user_message",
+      createdBy: marker.createdBy,
+      creationSource: marker.creationSource,
+      inputIntent: "turn_start",
+      text: marker.text,
+      attachments: marker.attachments,
+    };
+    const decodeWireItem = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem));
+    const encodeWireItem = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2TurnItem));
+    expect(decodeOrchestrationV2TurnItemJson(item)).not.toHaveProperty("panelParticipantId");
+    const decodedItem = decodeOrchestrationV2TurnItemJson({ ...item, panelParticipantId });
+    expect(decodedItem).toMatchObject({ type: "user_message", panelParticipantId });
+    expect(
+      decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(decodedItem)),
+    ).toEqual(decodedItem);
+    expect(decodeWireItem(encodeWireItem(decodedItem))).toEqual(decodedItem);
+  });
+
+  it("round-trips shell summaries and accepts unknown keys on the shell", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+    const encode = Schema.encodeSync(OrchestrationV2ThreadShellJson);
+    const decodeOldShell = Schema.decodeUnknownSync(
+      OrchestrationV2ThreadShellJson.mapFields(Struct.omit(["panel"])),
+    );
+    const shell = {
+      ...thread,
+      latestRunId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingRuntimeRequest: null,
+      latestVisibleMessage: null,
+      latestUserMessageAt: null,
+      hasActionableProposedPlan: false,
+      itemCount: 0,
+      visibleItemCount: 0,
+      settledOverride: null,
+      settledAt: null,
+    };
+    const legacy = decode(shell);
+    expect(legacy).not.toHaveProperty("panel");
+    const panel = { status: "idle", idleReason: "concluded" };
+    const decoded = decode({ ...shell, panel });
+    expect(decoded.panel).toEqual(panel);
+    const encoded = encode(decoded);
+    expect(decode({ ...encoded, futureField: true })).toEqual(decoded);
+    expect(decodeOldShell(encoded)).toEqual(legacy);
   });
 });
 

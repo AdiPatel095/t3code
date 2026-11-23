@@ -3,6 +3,7 @@ import { msg, T, useGT, useLocale, useMessages } from "gt-react-native";
 import { m } from "../../i18n/messages";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { toServerClock } from "@t3tools/client-runtime/clock";
+import type { PanelTimelineAnnotation } from "@t3tools/client-runtime/panel-chat";
 import { formatDuration } from "@t3tools/shared/orchestrationTimingCopy";
 import { Sheet } from "../../components/ui/Sheet";
 import { ListActionRow } from "../../components/ui/ListActionRow";
@@ -46,6 +47,7 @@ import { LinkRequestCard } from "./LinkRequestCard";
 import { FeedbackRequestCard } from "./FeedbackRequestCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import {
   WorktreePreparingHeader,
   WorktreeSetupCard,
@@ -241,6 +243,7 @@ import {
   createThreadFeedCache,
   threadFeedCompactionLabels,
   failedFeedRunIds,
+  derivePanelThreadFeed,
   deriveThreadFeedPresentation,
   threadFeedRunIsUnsettled,
   isContextCompactionActivityGroup,
@@ -385,6 +388,7 @@ export interface ThreadFeedProps {
   readonly threadTitle: string;
   readonly workspaceRoot?: string | null;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
+  readonly panelAnnotations?: ReadonlyMap<RunId, PanelTimelineAnnotation>;
   readonly pendingHandoff?: HandoffEndpoints | null;
   /** Thread states that close the feed: background work, then snooze or settle. */
   readonly statusLines?: ReadonlyArray<ThreadStatusLineModel>;
@@ -2004,6 +2008,7 @@ function renderFeedEntry(
     readonly markdownContentWidth: number;
     readonly contentWidth: number;
     readonly threadTitle: string;
+    readonly isPanel: boolean;
     readonly workflowOpening: WorkflowOpening | null;
     readonly userMessageGrouping: GroupedThreadFeedRow["userMessageGrouping"];
     readonly m: ReturnType<typeof useMessages>;
@@ -2011,6 +2016,45 @@ function renderFeedEntry(
 ) {
   const entry = info.item;
   const { markdownStyles, iconSubtleColor, userBubbleColor, m } = props;
+
+  if (entry.type === "panel-divider") {
+    return (
+      <ThreadContextDivider
+        label={entry.line.label}
+        iconColor={iconSubtleColor}
+        failed={entry.line.tone === "danger"}
+      >
+        {entry.line.detail ? (
+          <Text selectable className="shrink text-center text-xs text-foreground-muted">
+            {entry.line.detail}
+          </Text>
+        ) : null}
+      </ThreadContextDivider>
+    );
+  }
+
+  if (entry.type === "panel-speaker") {
+    const { speaker, askedBy } = entry;
+    const codeAgent = speaker.role === "code_agent";
+    return (
+      <View className="flex-row flex-wrap items-center gap-x-1.5 px-1 pb-1 pt-3">
+        {codeAgent ? (
+          <SymbolView name="doc.text.magnifyingglass" size={14} tintColor={iconSubtleColor} />
+        ) : (
+          <ProviderIcon provider={speaker.driver} size={14} />
+        )}
+        <Text className="shrink font-t3-medium text-xs text-foreground">
+          {codeAgent ? m(msg("Code agent")) : speaker.name}
+        </Text>
+        {codeAgent ? (
+          <Text className="shrink text-xs text-foreground-muted">{speaker.name}</Text>
+        ) : null}
+        {askedBy === undefined ? null : (
+          <Text className="shrink text-xs text-foreground-muted">· {askedBy}</Text>
+        )}
+      </View>
+    );
+  }
 
   if (entry.type === "guest-pending") {
     return (
@@ -2288,7 +2332,7 @@ function renderFeedEntry(
         />
       );
     }
-    if (isCompactionCommandFeedEntry(entry)) {
+    if (!props.isPanel && isCompactionCommandFeedEntry(entry)) {
       // Stands in for the compaction item until the provider reports it.
       const active = props.unsettledTurnId !== null && message.runId === props.unsettledTurnId;
       const reason = idleCompactionOf(message);
@@ -2709,7 +2753,7 @@ function renderFeedEntry(
               buttonSize={props.replyActionSize.button}
               iconSize={props.replyActionSize.icon}
             />
-            {message.projectedItem ? (
+            {!props.isPanel && message.projectedItem ? (
               <AssistantForkButton
                 environmentId={props.environmentId}
                 iconColor={iconSubtleColor}
@@ -3036,26 +3080,26 @@ function useThreadFeedPresentation(
   const [feedCache] = useState(createThreadFeedCache);
   const messages = useMessages();
   const locale = useLocale();
-  return appendPendingThreadMessages(
-    deriveThreadFeedPresentation(
-      props.feed,
-      props.latestRun,
-      expandedTurnIds,
-      new Set(
-        Object.entries(expandedWorkGroups)
-          .filter(([, expanded]) => expanded)
-          .map(([groupId]) => groupId),
-      ),
-      props.activeWorkStartedAt,
-      props.runlessWorkActive ?? false,
-      feedCache,
-      { toolCallVisibility: props.toolCallVisibility ?? "showAll", revealedMessageId },
-      messages,
-      locale,
-    ),
+  const panel = props.panelAnnotations !== undefined;
+  const rows = deriveThreadFeedPresentation(
     props.feed,
-    props.queuedMessages,
+    props.latestRun,
+    expandedTurnIds,
+    new Set(
+      Object.entries(expandedWorkGroups)
+        .filter(([, expanded]) => expanded)
+        .map(([groupId]) => groupId),
+    ),
+    props.activeWorkStartedAt,
+    props.runlessWorkActive ?? false,
+    feedCache,
+    { panel, toolCallVisibility: props.toolCallVisibility ?? "showAll", revealedMessageId },
+    messages,
+    locale,
   );
+  return props.panelAnnotations === undefined
+    ? appendPendingThreadMessages(rows, props.feed, props.queuedMessages)
+    : derivePanelThreadFeed(rows, props.panelAnnotations, messages);
 }
 
 type DisclosureLayout = {
@@ -3152,8 +3196,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const m = useMessages();
   const formatMessageTime = useMessageTimeFormatter();
   const { listRef, onIsAtEndChange, onHeaderMaterialVisibilityChange } = props;
+  const isPanel = props.panelAnnotations !== undefined;
   const workflowOpening = useWorkflowOpening(props.detailRef);
-  const guestShare = useThreadGuestShare(props.detailRef);
+  const guestShare = useThreadGuestShare(isPanel ? null : props.detailRef);
   const deviceType = useDeviceType();
   const duoColumns = useNativeWorkspaceColumnsSupported() && isDuoDevice(deviceType);
   const openPullRequest = useOpenPullRequest();
@@ -3804,6 +3849,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const openSetupDetails = () => setSetupDetailsThreadId(props.threadId);
   const listAppearanceData = {
     gt,
+    isPanel,
     setupDetailsOpen,
     disclosureLayout,
     reduceMotion,
@@ -4261,7 +4307,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         workspaceRoot={props.workspaceRoot}
       >
         <ThreadMediaVisibility rowId={info.item.id} setRetainedRowId={setRetainedMediaRowId}>
-          {info.item.type === "message" &&
+          {!isPanel &&
+          info.item.type === "message" &&
           info.item.message.projectedItem?.item.type === "user_message" &&
           info.item.message.projectedItem.item.freshContext ? (
             <ThreadContextDivider
@@ -4270,7 +4317,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               iconColor={iconSubtleColor}
             />
           ) : null}
-          {info.item.type === "message" &&
+          {!isPanel &&
+          info.item.type === "message" &&
           !isCompactionCommandFeedEntry(info.item) &&
           info.item.message.projectedItem?.item.type === "user_message" &&
           info.item.message.projectedItem.item.modelSwitch ? (
@@ -4282,6 +4330,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           ) : null}
           {renderFeedEntry(info, {
             m,
+            isPanel,
             userMessageGrouping: info.item.userMessageGrouping,
             formatMessageTime,
             environmentId: props.environmentId,
@@ -4399,7 +4448,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               // Same container as the live fold that replaces it.
               if (entry.type === "pending-fold") return "run-fold";
               if (entry.type !== "message") return entry.type;
-              if (isCompactionCommandFeedEntry(entry)) return "message:compaction";
+              if (!isPanel && isCompactionCommandFeedEntry(entry)) return "message:compaction";
               if (
                 entry.message.role === "assistant" &&
                 !terminalAssistantMessageIds.has(entry.message.id)

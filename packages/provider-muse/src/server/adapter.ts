@@ -108,7 +108,10 @@ const isOpenSessionError = Schema.is(ProviderAdapter.ProviderAdapterOpenSessionE
 const isProtocolError = Schema.is(ProviderAdapter.ProviderAdapterProtocolError);
 
 const MuseProviderCapabilitiesV2 = {
-  runtimePolicy: { enforcement: "native" },
+  runtimePolicy: {
+    enforcement: "native",
+    panelChat: { readOnly: "declined", panelistToolsRemoved: false },
+  },
   sessions: {
     supportsMultipleProviderThreadsPerSession: false,
     supportsModelSwitchInSession: true,
@@ -1310,6 +1313,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                   required: true,
                 })),
               };
+        const autoDecline =
+          (active?.input.runtimePolicy ?? input.runtimePolicy).panel !== undefined;
         // Muse does not propagate allowAll to workflow children; T3 answers for them.
         const autoApprove = child && input.runtimePolicy.runtimeMode === "full-access";
         const entry: PendingRequest = {
@@ -1317,21 +1322,31 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           request: runtimeRequest,
           node,
           item,
-          shown: !autoApprove || previous?.shown === true,
+          shown: !autoDecline && (!autoApprove || previous?.shown === true),
         };
         pending.set(requestId, entry);
         if (entry.shown) yield* showRequest(entry);
-        if (autoApprove)
-          yield* decideApproval(entry, "accept").pipe(
-            Effect.catch(() =>
+        if (autoDecline || autoApprove) {
+          const response =
+            native.type === "approval"
+              ? decideApproval(entry, autoDecline ? "decline" : "accept")
+              : request("userInput/cancel", {
+                  userInputId: native.value.userInputId,
+                  reason: "T3 Code panel turns cannot request user input.",
+                });
+          yield* response.pipe(
+            Effect.catch((cause) =>
               Effect.gen(function* () {
                 // Native updates may settle or replace this entry while the RPC is in flight.
-                if (!closed && !broken && pending.get(requestId) === entry)
+                if (!closed && !broken && pending.get(requestId) === entry) {
+                  if (autoDecline) return yield* failHost(cause);
                   yield* showRequest(entry);
+                }
               }).pipe(eventPermit.withPermits(1)),
             ),
             Effect.forkIn(scope),
           );
+        }
       });
       const handleRequestEvent = Effect.fnUntraced(function* (
         method: string,

@@ -1,4 +1,6 @@
 import { T, useGT, useMessages, Var } from "gt-react";
+import type { PanelTimelineAnnotation } from "@t3tools/client-runtime/panel-chat";
+import { PanelSpeakerRow } from "./PanelSpeakerRow";
 import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 import { threadErrorText } from "@t3tools/client-runtime/state/threads";
 import { threadEnvironment } from "../../state/threads";
@@ -61,6 +63,7 @@ import {
   BotIcon,
   CircleAlertIcon,
   MessagesSquareIcon,
+  UsersRoundIcon,
   Minimize2Icon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -256,6 +259,7 @@ interface MessagesTimelineProps {
 
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  panelAnnotations?: ReadonlyMap<RunId, PanelTimelineAnnotation> | undefined;
   latestRun: TimelineLatestRun | null;
   usageLimitRunId?: RunId | null;
   /** The run the screen reader announcer follows; see announcedRun. */
@@ -286,6 +290,7 @@ interface MessagesTimelineProps {
     readonly title: string;
     /** A side chat's inherited rows collapse into this link. */
     readonly sideChat?: boolean;
+    readonly panel?: boolean;
     /** Where it runs, when that is another environment. */
     readonly environmentLabel?: string;
     readonly open?: () => void;
@@ -376,6 +381,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   awaitingRequestId = null,
   listRef,
   timelineEntries,
+  panelAnnotations,
   findOpen = false,
   findExpanded = false,
   findQuery = "",
@@ -748,6 +754,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   );
   const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
     timelineEntries,
+    panelAnnotations,
     pendingApprovalRequestIds,
     latestRun,
     usageLimitRunId,
@@ -1237,7 +1244,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
                     environment: parentThreadLink.environmentLabel,
                   })
             }
-            icon={parentThreadLink.sideChat ? MessagesSquareIcon : BotIcon}
+            icon={
+              parentThreadLink.panel
+                ? UsersRoundIcon
+                : parentThreadLink.sideChat
+                  ? MessagesSquareIcon
+                  : BotIcon
+            }
             {...(parentThreadLink.open === undefined
               ? {}
               : { actionLabel: gt("Open parent thread"), onAction: parentThreadLink.open })}
@@ -1643,7 +1656,10 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   return (
     <div
       className={cn(
-        isWorkLogRow || isSubagentGroup
+        isWorkLogRow ||
+          isSubagentGroup ||
+          row.kind === "panel-speaker" ||
+          row.kind === "panel-divider"
           ? undefined
           : row.kind === "turn-fold" || row.kind === "working"
             ? "pb-1.5"
@@ -1697,6 +1713,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
           {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
         </WorkLogBlock>
       ) : null}
+      {row.kind === "panel-speaker" ? <PanelSpeakerRow row={row} /> : null}
+      {row.kind === "panel-divider" ? <TimelineSystemDivider {...row.line} wrapDetail /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow key={row.id} row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}

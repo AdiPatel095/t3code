@@ -218,6 +218,7 @@ import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import {
   isInSideChatPane,
+  openSideThread,
   resolveThreadOpenRoute,
   type SideChatParentPanel,
 } from "~/lib/sideChatPane";
@@ -295,7 +296,13 @@ import {
   useThreadCheckpointSummaries,
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
-import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { ChatComposer, PanelComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import type { ComposerPromptEditorHandle } from "./ComposerPromptEditorTiptap";
+import { panelTimelineAnnotations } from "@t3tools/client-runtime/panel-chat";
+import { PanelAddToChat, PanelDeleteButton, PanelRoster } from "./chat/PanelThreadPane";
+import { PanelStatusBar, usePanelControl } from "./chat/PanelStatusBar";
+import { PanelSetupDialog } from "./chat/PanelSetupDialog";
+import { PANEL_SETUP_REASONS } from "./chat/PanelSetupDialog.logic";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
 import {
@@ -542,6 +549,7 @@ export default function ChatView(props: ChatViewProps) {
         });
   const promptRef = useRef("");
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
+  const panelEditorRef = useRef<ComposerPromptEditorHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const queuedRunEdit = useQueuedRunEdit({
     environmentId,
@@ -869,6 +877,10 @@ export default function ChatView(props: ChatViewProps) {
     serverProjection === null ? null : deriveRunlessWorkStartedAt(serverProjection);
   const providerSubagentStatus =
     serverProjection === null ? null : deriveProviderSubagentStatus(serverProjection);
+  const panel = serverProjection?.thread.panel ?? null;
+  const isPanel = panel !== null || serverThread?.source.panel !== undefined;
+  const panelArchived = isPanel && serverThread?.archivedAt != null;
+  const panelControl = usePanelControl();
   const sideThreadKind = serverThread === null ? null : sideThreadKindOf(serverThread.source);
   const isProviderSubagent =
     sideThreadKind !== null && sideThreadComposer(sideThreadKind) === "read-only";
@@ -941,10 +953,11 @@ export default function ChatView(props: ChatViewProps) {
     if (sideChatParentRef !== null) {
       const title = sideChatParent?.title ?? gt("Parent thread");
       // Embedded, the parent is the view around it.
-      if (embedded) return { title, sideChat: true };
+      if (embedded) return { title, sideChat: true, panel: isPanel };
       return {
         title,
         sideChat: true,
+        panel: isPanel,
         open: (): void => {
           void navigate({
             to: "/$environmentId/$threadId",
@@ -1459,7 +1472,7 @@ export default function ChatView(props: ChatViewProps) {
   } = usePendingThreadRequests({
     environmentId,
     activeThreadId,
-    serverProjection,
+    serverProjection: isPanel ? null : serverProjection,
     supportsQuestionAttachments,
     composerDraftTarget,
     setComposerDraftPrompt,
@@ -1824,7 +1837,8 @@ export default function ChatView(props: ChatViewProps) {
   )
     ? activeProviderStatus
     : null;
-  const hasTimelineTopBanner = Boolean(timelineThreadError) || visibleProviderStatus !== null;
+  const hasTimelineTopBanner =
+    !isPanel && (Boolean(timelineThreadError) || visibleProviderStatus !== null);
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
@@ -1870,6 +1884,7 @@ export default function ChatView(props: ChatViewProps) {
           reportedModelSelection,
         );
   const showComposerContextStrip =
+    !isPanel &&
     !embedded &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
@@ -1933,16 +1948,32 @@ export default function ChatView(props: ChatViewProps) {
     sendInFlightRef,
   });
 
-  const { focusComposer: focusComposerStable, scheduleComposerFocus: scheduleComposerFocusStable } =
-    useComposerFocus(composerRef);
+  const { focusComposer, scheduleComposerFocus } = useComposerFocus(composerRef);
+  const focusComposerStable = useStableCallback(() => {
+    if (isPanel) panelEditorRef.current?.focusAtEnd();
+    else focusComposer();
+  });
+  const scheduleComposerFocusStable = useStableCallback(() => {
+    if (isPanel) window.requestAnimationFrame(focusComposerStable);
+    else scheduleComposerFocus();
+  });
   const canInterruptRunningThread =
-    canOperateThread && deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
+    canOperateThread &&
+    (isPanel
+      ? panel?.status === "running" && !panelArchived && panelControl.pending === null
+      : deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime));
   const onInterrupt = async () => {
     if (
       !activeThread ||
       !readEnvironmentScope(activeThread.environmentId, AuthOrchestrationOperateScope)
     )
       return;
+    if (isPanel) {
+      if (canInterruptRunningThread) {
+        await panelControl.onAction(scopeThreadRef(environmentId, activeThread.id), "stop");
+      }
+      return;
+    }
     const result = await interruptThreadTurn({
       environmentId,
       input: { threadId: activeThread.id },
@@ -3007,6 +3038,51 @@ export default function ChatView(props: ChatViewProps) {
   const openSideChatStable = useStableCallback(() => void sideChat.open());
   const openSurfaceInMainView = useOpenSurfaceInMainView(activeThreadRef);
   const sendSideChatStable = useStableCallback(sideChat.open);
+  const panelChatOffered =
+    activeThreadRef !== null &&
+    !embedded &&
+    !isPanel &&
+    activeThread?.lineage.sideChat !== true &&
+    !isSubagentThread &&
+    activeThread?.archivedAt == null &&
+    serverConfig?.environment.capabilities.panelChats === true;
+  const panelChatParentReady = isServerThread && activeMessageCount > 0;
+  const panelChatPermissionReason = canOperateThread
+    ? null
+    : gt("You don't have permission to run agents in this environment.");
+  const panelChatDisabledReason = !panelChatOffered
+    ? null
+    : panelChatParentReady
+      ? panelChatPermissionReason
+      : messages(PANEL_SETUP_REASONS.firstMessage);
+  const [panelSetup, setPanelSetup] = useState<{ key: string; topic?: string } | null>(null);
+  function openPanelSetup(topic?: string) {
+    if (
+      !panelChatOffered ||
+      panelChatDisabledReason !== null ||
+      activeThreadRef === null ||
+      !readEnvironmentScope(activeThreadRef.environmentId, AuthOrchestrationOperateScope)
+    )
+      return false;
+    setPanelSetup({ key: scopedThreadKey(activeThreadRef), ...(topic ? { topic } : {}) });
+    return true;
+  }
+  const openPanelSetupStable = useStableCallback(() => void openPanelSetup());
+  const openPanelSetupFromComposer = useStableCallback(openPanelSetup);
+  const closePanelSetupStable = useStableCallback((threadId: ThreadId | null) => {
+    setPanelSetup(null);
+    if (threadId === null || activeThreadRef === null) return;
+    openSideThread({
+      threadRef: scopeThreadRef(activeThreadRef.environmentId, threadId),
+      panelRef: activeThreadRef,
+      intent: "primary",
+      navigate: (threadRef) =>
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(threadRef),
+        }),
+    });
+  });
   const { onConfirmRevertStable, onForkFromRunStable, onRevertTimelineTurnStable } =
     useTimelineRewind({
       environmentId,
@@ -3152,6 +3228,8 @@ export default function ChatView(props: ChatViewProps) {
     acknowledgeActiveThreadWoke,
     onSideChat: sideChat.available ? sendSideChatStable : undefined,
     sideChatDisabledReason,
+    onPanelChat: panelChatOffered ? openPanelSetupFromComposer : undefined,
+    panelChatDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -3210,7 +3288,7 @@ export default function ChatView(props: ChatViewProps) {
   };
   const onExpandTimelineImageStable = useStableCallback(onExpandTimelineImage);
   const queuedRunsControl =
-    isServerThread && activeThread ? (
+    isServerThread && activeThread && !isPanel ? (
       <>
         <QueuedRunsControl
           ref={queuedRunsControlRef}
@@ -3465,7 +3543,7 @@ export default function ChatView(props: ChatViewProps) {
   const panelToggleControls = (
     <PanelLayoutControls
       {...panelToggleControlProps}
-      showThreadPanelControl={!inlineRightPanelOwnsTitleBar}
+      showThreadPanelControl={!isPanel && !inlineRightPanelOwnsTitleBar}
     />
   );
   const threadPanelHeaderControl = <ThreadPanelHeaderControl {...panelToggleControlProps} />;
@@ -3533,23 +3611,54 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
             {!rightPanelControlsAtRoot && !rightPanelControlsInPanel ? panelLayoutControls : null}
-            {inlineRightPanelOwnsTitleBar ? threadPanelHeaderControl : null}
-            <ChatHeader
-              activeThreadEnvironmentId={activeThread.environmentId}
-              activeThreadId={activeThread.id}
-              isServerThread={isServerThread}
-              activeThreadTitle={activeThread.title}
-              activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
-              activeProject={activeProject ?? null}
-              parentThreadLink={headerParentThreadLink}
-              onOpenThread={onOpenRelatedThreadStable}
-              rightPanelOpen={inlineRightPanelOwnsTitleBar}
-              onNewThreadInProject={handleNewThreadInActiveProjectStable}
-              {...(activeDraftLogicalProjectKey
-                ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }
-                : {})}
-              {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
-            />
+            {!isPanel && inlineRightPanelOwnsTitleBar ? threadPanelHeaderControl : null}
+            {isPanel ? (
+              <div
+                className={cn(
+                  "flex min-w-0 flex-1 items-center gap-1 [-webkit-app-region:no-drag]",
+                  inlineRightPanelOwnsTitleBar ? "pr-10" : "pr-24",
+                )}
+              >
+                <h2 className="min-w-0 flex-1 truncate text-xs font-medium">
+                  {activeThread.title}
+                </h2>
+                {panel === null ? null : <PanelRoster panel={panel} />}
+                {sideChatParentRef === null || activeThreadRef === null ? null : (
+                  <>
+                    <PanelAddToChat
+                      parentRef={sideChatParentRef}
+                      panelRef={activeThreadRef}
+                      title={activeThread.title}
+                    />
+                    {parentThreadLink?.open ? (
+                      <PanelDeleteButton
+                        panelRef={activeThreadRef}
+                        title={activeThread.title}
+                        canOperate={canOperateThread}
+                        onDeleted={parentThreadLink.open}
+                      />
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : (
+              <ChatHeader
+                activeThreadEnvironmentId={activeThread.environmentId}
+                activeThreadId={activeThread.id}
+                isServerThread={isServerThread}
+                activeThreadTitle={activeThread.title}
+                activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
+                activeProject={activeProject ?? null}
+                parentThreadLink={headerParentThreadLink}
+                onOpenThread={onOpenRelatedThreadStable}
+                rightPanelOpen={inlineRightPanelOwnsTitleBar}
+                onNewThreadInProject={handleNewThreadInActiveProjectStable}
+                {...(activeDraftLogicalProjectKey
+                  ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }
+                  : {})}
+                {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
+              />
+            )}
           </header>
         )}
 
@@ -3574,23 +3683,25 @@ export default function ChatView(props: ChatViewProps) {
           >
             <ThreadFind onClose={focusComposerStable} />
             {isWorkspaceFileDragActive ? <WorkspaceFileDropOverlay /> : null}
-            <ChatBannerLane
-              environmentId={activeThread.environmentId}
-              providerStatus={visibleProviderStatus}
-              providerStatusDismissalKey={providerStatusDismissalKey}
-              onOpenProviderSetup={openProviderSetupStable}
-              threadId={activeThread.id}
-              threadError={timelineThreadError}
-              threadErrorClass={
-                threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorClass ?? null) : null
-              }
-              threadErrorCode={
-                threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorCode ?? null) : null
-              }
-              threadErrorBannerKey={threadErrorBannerKey}
-              setThreadError={setThreadError}
-              setThreadErrorBannerDismissTick={setThreadErrorBannerDismissTick}
-            />
+            {isPanel ? null : (
+              <ChatBannerLane
+                environmentId={activeThread.environmentId}
+                providerStatus={visibleProviderStatus}
+                providerStatusDismissalKey={providerStatusDismissalKey}
+                onOpenProviderSetup={openProviderSetupStable}
+                threadId={activeThread.id}
+                threadError={timelineThreadError}
+                threadErrorClass={
+                  threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorClass ?? null) : null
+                }
+                threadErrorCode={
+                  threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorCode ?? null) : null
+                }
+                threadErrorBannerKey={threadErrorBannerKey}
+                setThreadError={setThreadError}
+                setThreadErrorBannerDismissTick={setThreadErrorBannerDismissTick}
+              />
+            )}
             <div
               {...conversationArea}
               className="relative flex min-h-0 flex-1 flex-col bg-background"
@@ -3611,21 +3722,33 @@ export default function ChatView(props: ChatViewProps) {
                   citationRequest={citationRequest}
                   citationHistory={citationHistory}
                   onCiteAssistantText={citeAssistantTextStable}
-                  onReplyToResponse={replyToResponseStable}
-                  {...(activeProject && !runsOutsideHostCheckout
+                  {...(isPanel ? {} : { onReplyToResponse: replyToResponseStable })}
+                  panelAnnotations={
+                    panel === null || serverProjection === null
+                      ? undefined
+                      : panelTimelineAnnotations(
+                          serverProjection.runs,
+                          panel,
+                          messages,
+                          serverProjection.messages,
+                        )
+                  }
+                  {...(!isPanel && activeProject && !runsOutsideHostCheckout
                     ? { onRunShellCommand: parentPanel?.runShellCommand ?? runShellCommandStable }
                     : {})}
                   isWorking={isWorking}
                   runlessWorkActive={runlessWorkStartedAt !== null}
                   isCompacting={isCompacting}
                   awaitingUser={
-                    activePendingApproval !== null
-                      ? "approval"
-                      : activePendingUserInput !== null ||
-                          // A secret request has no runtime request; the shell carries it.
-                          activeThreadShell?.hasPendingUserInput === true
-                        ? "input"
-                        : null
+                    isPanel
+                      ? null
+                      : activePendingApproval !== null
+                        ? "approval"
+                        : activePendingUserInput !== null ||
+                            // A secret request has no runtime request; the shell carries it.
+                            activeThreadShell?.hasPendingUserInput === true
+                          ? "input"
+                          : null
                   }
                   awaitingRequestId={
                     activePendingApproval?.requestId ?? activePendingUserInput?.requestId ?? null
@@ -3662,10 +3785,10 @@ export default function ChatView(props: ChatViewProps) {
                   }
                   routeThreadKey={displayedTimelineKey}
                   displayThreadKey={displayedTimelineKey}
-                  announceTurnStatus={!isProviderSubagent}
+                  announceTurnStatus={!isProviderSubagent && !isPanel}
                   onOpenToolDiff={parentPanel?.openToolDiff ?? onOpenToolDiffStable}
                   // Side chat runs keep no checkpoints to diff, and a fork would promote the side chat.
-                  {...(embedded
+                  {...(embedded || isPanel
                     ? {}
                     : { onOpenTurnDiff: onOpenTurnDiffStable, onForkFromRun: onForkFromRunStable })}
                   onOpenThread={onOpenRelatedThreadStable}
@@ -3762,7 +3885,7 @@ export default function ChatView(props: ChatViewProps) {
                         : undefined
                     }
                   >
-                    <ChildThreadApprovals threadRef={activeThreadRef} />
+                    {isPanel ? null : <ChildThreadApprovals threadRef={activeThreadRef} />}
                     <div className="relative">
                       <ComposerSurface.Shell contextRow={showComposerContextStrip}>
                         <ComposerSurface.Host
@@ -3794,7 +3917,54 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                               />
                             ) : null}
-                            {!composerMounted ? null : (
+                            {isPanel ? (
+                              panel === null || activeThreadRef === null ? null : (
+                                <>
+                                  <PanelStatusBar
+                                    panel={panel}
+                                    canOperate={canOperateThread}
+                                    archived={panelArchived}
+                                    pending={
+                                      panelControl.pending?.threadRef.threadId ===
+                                        activeThread.id &&
+                                      panelControl.pending.threadRef.environmentId ===
+                                        activeThread.environmentId
+                                        ? panelControl.pending.action
+                                        : null
+                                    }
+                                    onAction={(action) =>
+                                      void panelControl.onAction(activeThreadRef, action)
+                                    }
+                                  />
+                                  {canOperateThread && !panelArchived ? (
+                                    <PanelComposer
+                                      key={activeThreadKey}
+                                      panel={panel}
+                                      threadRef={activeThreadRef}
+                                      title={activeThread.title}
+                                      editorRef={panelEditorRef}
+                                      settings={settings}
+                                      keybindings={keybindings}
+                                      getShortcutContext={getShortcutContextStable}
+                                      resolvedTheme={resolvedTheme}
+                                      onPageScrollKeyDown={onComposerPageScrollKeyDownStable}
+                                      onPageScrollKeyUp={onComposerPageScrollKeyUpStable}
+                                      onPageScrollRelease={onComposerPageScrollReleaseStable}
+                                    />
+                                  ) : (
+                                    <ComposerSurface.Main>
+                                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                                        {panelArchived
+                                          ? gt("Archived")
+                                          : gt(
+                                              "You don't have permission to run agents in this environment.",
+                                            )}
+                                      </div>
+                                    </ComposerSurface.Main>
+                                  )}
+                                </>
+                              )
+                            ) : !composerMounted ? null : (
                               <ChatComposer
                                 canOperateThread={canOperateThread}
                                 reportedModelSelection={reportedModelSelection}
@@ -3862,6 +4032,8 @@ export default function ChatView(props: ChatViewProps) {
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}
                                 sideChatAvailable={sideChat.available}
                                 sideChatDisabledReason={sideChatDisabledReason}
+                                panelChatOffered={panelChatOffered}
+                                panelChatDisabledReason={panelChatDisabledReason}
                                 onFreshSession={
                                   freshSessionCommandAvailable ? armFreshSessionStable : undefined
                                 }
@@ -4057,7 +4229,7 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
 
-            {embedded ? null : (
+            {embedded || isPanel ? null : (
               <>
                 <BranchRestoreConfirmHost
                   threadKey={activeThreadKey}
@@ -4219,6 +4391,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
+          onAddPanelChat={panelChatOffered ? openPanelSetupStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && diffAvailable}
@@ -4228,6 +4401,8 @@ export default function ChatView(props: ChatViewProps) {
           deviceAvailable={activeThreadRef !== null}
           sideChatAvailable={sideChat.available}
           sideChatDisabledReason={sideChatDisabledReason}
+          panelChatAvailable={panelChatParentReady}
+          panelChatDisabledReason={panelChatParentReady ? panelChatPermissionReason : null}
         >
           {rightPanelContent}
         </ChatRightPanel>
@@ -4242,6 +4417,20 @@ export default function ChatView(props: ChatViewProps) {
         onConfirm={onConfirmRevertStable}
       />
       {embedded ? null : <LinkPullRequestDialogHost />}
+      {panelSetup !== null &&
+      panelSetup.key === activeThreadKey &&
+      activeThreadRef &&
+      activeThread ? (
+        <PanelSetupDialog
+          key={panelSetup.key}
+          parentRef={activeThreadRef}
+          threadModel={activeThread.modelSelection}
+          providers={providerInstanceEntries}
+          workspaceCwd={gitCwd}
+          {...(panelSetup.topic === undefined ? {} : { topic: panelSetup.topic })}
+          onClose={closePanelSetupStable}
+        />
+      ) : null}
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />
     </div>

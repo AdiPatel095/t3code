@@ -56,9 +56,10 @@ import {
   PlusIcon,
   SquareIcon,
   UnplugIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type PointerEvent, type ReactNode } from "react";
 import type { MessageResolver } from "~/i18n/messages";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -89,6 +90,12 @@ import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadR
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
 import { useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
 import { openSideThread, resolveThreadOpenRoute } from "../../lib/sideChatPane";
+import { SidebarPointerSensor } from "../Sidebar.pointer";
+import {
+  dropThreadContext,
+  endThreadContextDrag,
+  moveThreadContextDrag,
+} from "./threadContextDrag";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -476,6 +483,7 @@ export function ThreadRelationshipsPanel(props: {
   readonly threadId: ThreadId;
   readonly showLineage: boolean;
   readonly showSideChats: boolean;
+  readonly showPanelChats?: boolean;
 }) {
   const gt = useGT();
   const m = useMessages();
@@ -627,9 +635,17 @@ export function ThreadRelationshipsPanel(props: {
     active = [],
     previous = [],
     sideChats = [],
+    panelChats = [],
   } = groupBy(visibleRelationships, ({ threadId, edge }) => {
     const isParent = isParentThreadRelationship(edge, props.threadId);
-    if (!isParent && graph.nodes.get(threadId)?.thread?.lineage.sideChat === true)
+    const relatedThread = graph.nodes.get(threadId)?.thread;
+    if (
+      !isParent &&
+      relatedThread?.panel !== undefined &&
+      relatedThread.lineage.parentThreadId === props.threadId
+    )
+      return "panelChats";
+    if (!isParent && relatedThread?.lineage.sideChat === true && relatedThread.panel === undefined)
       return "sideChats";
     if (edge.kind !== "subagent" || isParent) return "related";
     return isFinishedAgentStatus(edge.status) ? "previous" : "active";
@@ -676,8 +692,12 @@ export function ThreadRelationshipsPanel(props: {
       (canDetach && sideChats.length > 0));
   const sideChatsVisible = props.showSideChats && sideChats.length > 0;
   const runningSideChats = sideChats.filter(({ edge }) => edge.status === "running").length;
+  const panelChatsVisible = props.showPanelChats === true && panelChats.length > 0;
+  const runningPanelChats = panelChats.filter(
+    ({ threadId }) => graph.nodes.get(threadId)?.thread?.panel?.status === "running",
+  ).length;
 
-  if (!lineageVisible && !sideChatsVisible) {
+  if (!lineageVisible && !sideChatsVisible && !panelChatsVisible) {
     return null;
   }
 
@@ -705,6 +725,34 @@ export function ThreadRelationshipsPanel(props: {
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(threadRef),
         }),
+    });
+  };
+
+  const startPanelDrag = (event: PointerEvent, threadId: ThreadId, title: string) => {
+    if (
+      !event.isPrimary ||
+      event.button !== 0 ||
+      event.pointerType === "touch" ||
+      event.metaKey ||
+      event.ctrlKey
+    )
+      return;
+    const thread = { ...scopeThreadRef(props.environmentId, threadId), title };
+    return new SidebarPointerSensor({
+      event: event.nativeEvent,
+      active: scopedThreadKey(thread),
+      options: {
+        distance: 6,
+        onAttach: () => {},
+        onFinish: endThreadContextDrag,
+        onDrop: (point) => dropThreadContext(point, [thread]),
+      },
+      onStart: () => {},
+      onMove: (point) => moveThreadContextDrag(point, { title, count: 1, panel: true }),
+      onPending: () => {},
+      onAbort: () => {},
+      onCancel: () => {},
+      onEnd: () => {},
     });
   };
 
@@ -795,17 +843,22 @@ export function ThreadRelationshipsPanel(props: {
     const isSubagent = edge.kind === "subagent";
     const isMergeTarget = threadId === mergeTargetThreadId;
     const isParent = isParentThreadRelationship(edge, props.threadId);
+    const panel = isParent ? undefined : node?.thread?.panel;
     const rowStatus =
+      panel?.status ??
       (isParent && threadId === parentRef?.threadId
         ? (node?.thread?.activityRunStatus ?? parentNativeStatus)
-        : undefined) ?? threadRelationshipRowStatus(graph, { threadId, edge });
+        : undefined) ??
+      threadRelationshipRowStatus(graph, { threadId, edge });
     const RelationshipIcon = isParent
       ? CornerLeftUpIcon
       : isSubagent
         ? BotIcon
-        : node?.thread?.lineage.sideChat === true
-          ? MessagesSquareIcon
-          : GitForkIcon;
+        : panel !== undefined
+          ? UsersRoundIcon
+          : node?.thread?.lineage.sideChat === true
+            ? MessagesSquareIcon
+            : GitForkIcon;
 
     const projectedAgent = isSubagent && !isParent ? subagentsByThreadId.get(threadId) : undefined;
     const workflowGroup =
@@ -850,7 +903,9 @@ export function ThreadRelationshipsPanel(props: {
       : "";
     const project = projects.find((project) => project.id === node?.thread?.projectId);
     const isSideChat = node?.thread?.lineage.sideChat === true && !isParent;
-    const hint = relationshipHint(edge, props.threadId, isSideChat, m);
+    const hint = panel
+      ? gt("Open panel chat")
+      : relationshipHint(edge, props.threadId, isSideChat, m);
     const openProps =
       isSideChat || (isSubagent && !isParent)
         ? trigger((intent) => openSideThreadRow(threadId, intent))
@@ -892,7 +947,7 @@ export function ThreadRelationshipsPanel(props: {
             {threadTitle}
           </span>
         </span>
-        {agent ? null : (
+        {agent || panel ? null : (
           <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
         )}
         {agent && !failed && (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
@@ -923,6 +978,9 @@ export function ThreadRelationshipsPanel(props: {
               size="sm"
               variant="ghost"
               part={workflowGroup ? "primary" : "row"}
+              onPointerDown={
+                panel ? (event) => startPanelDrag(event, threadId, threadTitle) : undefined
+              }
               {...openProps}
             />
           }
@@ -1137,6 +1195,26 @@ export function ThreadRelationshipsPanel(props: {
             key={`${scopedThreadKey(ref)}:side-chats`}
             label={null}
             rows={sideChats}
+            expanded
+          >
+            {(visibleRows) => visibleRows.map(renderRelationshipRow)}
+          </ThreadLineageGroup>
+        </ThreadDetailsSection>
+      ) : null}
+      {panelChatsVisible ? (
+        <ThreadDetailsSection
+          headingId="thread-details-panel-chats-heading"
+          title={
+            runningPanelChats > 0
+              ? gt("Panel chats · {count} running", { count: runningPanelChats })
+              : gt("Panel chats")
+          }
+          data-thread-panel-chats-panel
+        >
+          <ThreadLineageGroup
+            key={`${scopedThreadKey(ref)}:panel-chats`}
+            label={null}
+            rows={panelChats}
             expanded
           >
             {(visibleRows) => visibleRows.map(renderRelationshipRow)}

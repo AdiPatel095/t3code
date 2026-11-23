@@ -53,6 +53,7 @@ export function restartContinuationBlocked(
 ): boolean {
   const { thread } = projection;
   if (
+    thread.panel !== undefined ||
     thread.archivedAt !== null ||
     thread.deletedAt !== null ||
     thread.settledOverride === "settled" ||

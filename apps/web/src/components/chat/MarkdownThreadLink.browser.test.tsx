@@ -9,6 +9,8 @@ import { act, render } from "../../../test/render";
 import { isMacPlatform } from "../../lib/utils";
 import { linkedThreadSurface } from "../../linkedThreadSurface";
 import { selectThreadRightPanelState, useRightPanelStore } from "../../rightPanelStore";
+import { makeThreadFixture } from "../../test-fixtures";
+import type { Thread } from "../../types";
 import { MarkdownThreadLink } from "./MarkdownThreadLink";
 
 const HERE = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("here"));
@@ -16,18 +18,18 @@ const panel = () => selectThreadRightPanelState(useRightPanelStore.getState().by
 
 const state = vi.hoisted(() => ({
   reply: null as unknown,
-  remote: null as unknown,
-  cached: null as unknown,
+  remote: null as Thread | null,
+  cached: null as Thread | null,
   linked: new Map<string, string>(),
   connected: [] as Array<string>,
 }));
 vi.mock(import("../../state/entities"), () => ({
-  useThreadShell: ((ref: { environmentId: string } | null) =>
+  useThreadShell: (ref) =>
     ref?.environmentId === "remote"
       ? state.remote
       : ref?.environmentId === "saved-vm"
         ? state.cached
-        : null) as never,
+        : null,
   useThreadRefs: (enabled = true) =>
     enabled
       ? [{ environmentId: EnvironmentId.make("remote"), threadId: ThreadId.make("older-thread") }]
@@ -74,17 +76,12 @@ function setup() {
   state.cached = null;
   state.connected = ["environment", "remote"];
   useRightPanelStore.setState({ byThreadKey: {} });
-  state.remote = {
+  state.remote = makeThreadFixture({
     environmentId: EnvironmentId.make("remote"),
     id: ThreadId.make("older-thread"),
     title: "Remote thread",
     projectId: ProjectId.make("essay-project"),
-    lineage: {
-      rootThreadId: ThreadId.make("older-thread"),
-      parentThreadId: null,
-      relationshipToParent: null,
-    },
-  };
+  });
   return { reply, registry: AtomRegistry.make() };
 }
 
@@ -224,28 +221,55 @@ it.for([
   expect(panel().surfaces).toHaveLength(1);
 });
 
-it("reads through the link when a disconnected machine's thread is only cached here", async () => {
-  const { registry } = setup();
-  using _registry = { [Symbol.dispose]: () => registry.dispose() };
-  state.linked = new Map([["saved-vm", "fs-17"]]);
-  state.cached = { id: ThreadId.make("there"), title: "Cached title", projectId: null };
-  const environmentId = EnvironmentId.make("environment");
-  const link = { environmentId: EnvironmentId.make("saved-vm"), threadId: ThreadId.make("there") };
-  await using screen = await render(
-    <RegistryContext value={registry}>
-      <MarkdownThreadLink environmentId={environmentId} threadRef={HERE} link={link} label={null} />
-    </RegistryContext>,
-  );
-  await screen.getByRole("button", { name: "Thread, Cached title" }).click();
-  expect(panel().surfaces).toEqual([
-    linkedThreadSurface({
-      viaEnvironmentId: environmentId,
-      ...link,
-      label: "fs-17",
+it.for([
+  { kind: "thread", panelSummary: undefined, icon: "lucide-messages-square" },
+  {
+    kind: "panel",
+    panelSummary: { status: "idle", idleReason: null } as const,
+    icon: "lucide-users-round",
+  },
+])(
+  "reads through the link when a disconnected machine's $kind is only cached here",
+  async ({ panelSummary, icon }) => {
+    const { registry } = setup();
+    using _registry = { [Symbol.dispose]: () => registry.dispose() };
+    state.linked = new Map([["saved-vm", "fs-17"]]);
+    const environmentId = EnvironmentId.make("environment");
+    const link = {
+      environmentId: EnvironmentId.make("saved-vm"),
+      threadId: ThreadId.make("there"),
+    };
+    const cached = makeThreadFixture({
+      environmentId: link.environmentId,
+      id: link.threadId,
       title: "Cached title",
-    }),
-  ]);
-});
+    });
+    state.cached = panelSummary
+      ? { ...cached, source: { ...cached.source, panel: panelSummary } }
+      : cached;
+    await using screen = await render(
+      <RegistryContext value={registry}>
+        <MarkdownThreadLink
+          environmentId={environmentId}
+          threadRef={HERE}
+          link={link}
+          label={null}
+        />
+      </RegistryContext>,
+    );
+    const chip = screen.getByRole("button", { name: "Thread, Cached title" });
+    await chip.click();
+    expect(chip.element().querySelector("svg")).toHaveClass(icon);
+    expect(panel().surfaces).toEqual([
+      linkedThreadSurface({
+        viaEnvironmentId: environmentId,
+        ...link,
+        label: "fs-17",
+        title: "Cached title",
+      }),
+    ]);
+  },
+);
 
 it("opens a linked machine's thread directly once this client is connected to it", async () => {
   const { registry, reply } = setup();

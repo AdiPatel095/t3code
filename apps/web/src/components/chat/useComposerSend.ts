@@ -1,7 +1,10 @@
-import { msg } from "gt-react";
+import { msg, useGT } from "gt-react";
+import { PANEL_TEXT_MAX_CHARS } from "@t3tools/shared/panelChat";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import { parsePanelComposerDraft } from "@t3tools/client-runtime/state/composer-dispatch";
 import { readWorktreeBaseBranch } from "../../worktreeRepositoryChoiceStore";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
@@ -282,6 +285,8 @@ interface ComposerSendInput {
   readonly onSideChat?: ((message: SideChatMessage | undefined) => Promise<boolean>) | undefined;
   /** Refuses `/side` with this reason and keeps the draft. */
   readonly sideChatDisabledReason: string | null;
+  readonly onPanelChat?: ((topic: string) => boolean) | undefined;
+  readonly panelChatDisabledReason?: string | null;
   readonly handleNewThreadInActiveProject: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
@@ -300,6 +305,42 @@ interface ComposerSendInput {
  * thread, a feedback upload, and resuming an interrupted run. Each path restores the draft
  * when it fails.
  */
+export function usePostToPanel(threadRef: ScopedThreadRef) {
+  const gt = useGT();
+  const post = useAtomCommand(threadEnvironment.postToPanel, { reportFailure: false });
+  const inFlight = useRef(false);
+
+  return async (draft: string) => {
+    const { environmentId, threadId } = threadRef;
+    const text = draft.trim();
+    if (
+      inFlight.current ||
+      text.length === 0 ||
+      text.length > PANEL_TEXT_MAX_CHARS ||
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
+      return;
+
+    inFlight.current = true;
+    const result = await post({
+      environmentId,
+      input: { threadId, messageId: newMessageId(), text },
+    });
+    inFlight.current = false;
+    if (result._tag === "Success") {
+      const store = useComposerDraftStore.getState();
+      if (store.getComposerDraft(threadRef)?.prompt === draft) store.setPrompt(threadRef, "");
+    } else if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title: gt("Could not send to the panel"),
+        ...(error instanceof Error ? { description: error.message } : {}),
+      });
+    }
+  };
+}
+
 export function useComposerSend(input: ComposerSendInput) {
   const {
     environmentId,
@@ -372,6 +413,8 @@ export function useComposerSend(input: ComposerSendInput) {
     acknowledgeActiveThreadWoke,
     onSideChat,
     sideChatDisabledReason,
+    onPanelChat,
+    panelChatDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -461,6 +504,25 @@ export function useComposerSend(input: ComposerSendInput) {
         : null;
     const answeringQuestion =
       Boolean(activePendingUserInput) && sendCtx?.answeringPendingUserInput !== false;
+    if (onPanelChat && !directAnnotation && !queuedRunEdit.isEditing && !answeringQuestion) {
+      const command = parsePanelComposerDraft(promptAtSend);
+      if (command) {
+        if (panelChatDisabledReason) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: m(msg("Could not start the panel chat")),
+              description: panelChatDisabledReason,
+            }),
+          );
+        } else if (isCurrentRouteThread() && onPanelChat(command.topic)) {
+          setComposerDraftPrompt(composerDraftTarget, command.retainedPrompt);
+          promptRef.current = command.retainedPrompt;
+          composerRef.current?.resetCursorState({ prompt: command.retainedPrompt });
+        }
+        return;
+      }
+    }
     const startsSideChat =
       onSideChat !== undefined && sideChatCommand !== null && sideChatDisabledReason === null;
     // An answer responds to the open request rather than starting a turn, so the new-message

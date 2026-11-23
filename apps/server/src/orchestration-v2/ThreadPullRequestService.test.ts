@@ -939,8 +939,9 @@ describe("ThreadPullRequestServiceV2 reads", () => {
           number: 42,
           url: "https://github.com/acme/project/pull/42",
         };
+        const { panel: _panel, ...shell } = threadShell("branch-pr-thread");
         const thread = {
-          ...threadShell("branch-pr-thread"),
+          ...shell,
           branch: "main",
           branchPullRequest: savedReference,
           linkedPullRequest: savedReference,

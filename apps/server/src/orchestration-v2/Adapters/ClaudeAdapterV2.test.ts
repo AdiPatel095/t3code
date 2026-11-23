@@ -606,28 +606,50 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     );
   });
 
-  it("maps canonical read-only never policy to Claude dontAsk with read-only tools", () => {
-    const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
-      ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: "/workspace",
-        approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "readOnly",
-          access: { type: "fullAccess" },
-          networkAccess: false,
-        },
-      }),
-    );
+  it.each([undefined, "panelist", "code_agent"] as const)(
+    "maps canonical read-only never policy to Claude query options for role %s",
+    (role) => {
+      const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
+        ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: role === undefined ? "full-access" : "approval-required",
+          interactionMode: "default",
+          cwd: "/workspace",
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "readOnly",
+            access: { type: "fullAccess" },
+            networkAccess: false,
+          },
+          ...(role === undefined ? {} : { panel: { role } }),
+        }),
+      );
 
-    assert.deepEqual(queryPolicy, {
-      permissionMode: "dontAsk",
-      tools: ClaudeAdapterV2.CLAUDE_READ_ONLY_ALLOWED_TOOLS,
-      allowedTools: ClaudeAdapterV2.CLAUDE_READ_ONLY_ALLOWED_TOOLS,
-      installPermissionCallback: false,
-    });
-  });
+      const readOnlyTools = ["Read", "Glob", "Grep"];
+      const expectedTools = role === "panelist" ? [] : readOnlyTools;
+      const expectedAllowedTools = role === "panelist" ? undefined : readOnlyTools;
+      const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+        ...queryPolicy,
+        ...ClaudeAdapterV2.claudeMcpQueryOverrides({
+          mcpSession: undefined,
+          readOnlySandbox: true,
+          ...(queryPolicy.allowedTools === undefined
+            ? {}
+            : { allowedTools: queryPolicy.allowedTools }),
+        }),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        nativeThreadId: "native-read-only-policy",
+        resume: false,
+        cwd: "/workspace",
+      });
+
+      assert.equal(options.permissionMode, "dontAsk");
+      assert.deepEqual(options.tools, expectedTools);
+      assert.deepEqual(options.allowedTools, expectedAllowedTools);
+      assert.equal(options.strictMcpConfig, role === undefined ? undefined : true);
+      assert.notProperty(options, "mcpServers");
+      assert.isFalse(queryPolicy.installPermissionCallback);
+    },
+  );
 
   it("does not auto-allow reads for canonical restricted read-only never policy", () => {
     const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(

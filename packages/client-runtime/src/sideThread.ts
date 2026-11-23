@@ -1,10 +1,14 @@
-import type { OrchestrationV2AppThread, SideThreadOpenTarget } from "@t3tools/contracts";
+import type {
+  OrchestrationV2AppThread,
+  OrchestrationV2PanelShellSummary,
+  SideThreadOpenTarget,
+} from "@t3tools/contracts";
 
 /**
  * A thread that opens beside the one you are in. `linked` lives on a linked environment this client
  * has no connection to; the others are threads of a connected environment.
  */
-export type SideThreadKind = "side-chat" | "subagent" | "provider-subagent" | "linked";
+export type SideThreadKind = "panel" | "side-chat" | "subagent" | "provider-subagent" | "linked";
 
 /**
  * Which side thread `thread` is, or null for a thread that opens like any other. A row that does
@@ -13,11 +17,15 @@ export type SideThreadKind = "side-chat" | "subagent" | "provider-subagent" | "l
 export function sideThreadKindOf(
   thread:
     | (Pick<OrchestrationV2AppThread, "lineage"> &
-        Partial<Pick<OrchestrationV2AppThread, "creationSource">>)
+        Partial<Pick<OrchestrationV2AppThread, "creationSource">> & {
+          readonly panel?: OrchestrationV2PanelShellSummary | undefined;
+          readonly source?: { readonly panel?: OrchestrationV2PanelShellSummary | undefined };
+        })
     | null
     | undefined,
 ): Exclude<SideThreadKind, "linked"> | null {
   if (!thread) return null;
+  if (thread.panel !== undefined || thread.source?.panel !== undefined) return "panel";
   if (thread.lineage.sideChat === true && thread.lineage.parentThreadId !== null) {
     return "side-chat";
   }
@@ -40,6 +48,7 @@ export function sideThreadComposer(kind: SideThreadKind): SideThreadComposer {
       return "read-only-connect";
     case "provider-subagent":
       return "read-only";
+    case "panel":
     case "side-chat":
     case "subagent":
       return "composer";

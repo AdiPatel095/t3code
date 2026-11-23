@@ -400,7 +400,10 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+    const normalizeEvents = (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      panelPost?: { readonly threadId: ThreadId; readonly runOrdinal: number },
+    ) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -415,7 +418,12 @@ const layerBase: Layer.Layer<
             ? turnItemPositions
                 .normalize(
                   event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+                  event.payload.runId !== null
+                    ? runOrdinals.get(event.payload.runId)
+                    : event.payload.type === "user_message" &&
+                        panelPost?.threadId === event.threadId
+                      ? panelPost.runOrdinal
+                      : undefined,
                 )
                 .pipe(Effect.map((payload) => ({ ...event, payload })))
             : Effect.succeed(event),
@@ -837,11 +845,24 @@ const layerBase: Layer.Layer<
             }
           }
 
+          // Panel posts are runless, but sort after the latest existing run's items. The
+          // post may start a new run in this same commit, so read the range before applying it.
+          const latestPanelRun =
+            input.commandType === "panel.post"
+              ? (yield* sql<{ readonly ordinal: number }>`
+                  SELECT ordinal FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${input.threadId}
+                  ORDER BY ordinal DESC LIMIT 1
+                `)[0]
+              : undefined;
           const runId = input.updateDelegatedCompletionOnlyRunId;
           const normalized = yield* normalizeEvents(
             runId === undefined
               ? input.events
               : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+            latestPanelRun === undefined
+              ? undefined
+              : { threadId: input.threadId, runOrdinal: latestPanelRun.ordinal },
           );
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,

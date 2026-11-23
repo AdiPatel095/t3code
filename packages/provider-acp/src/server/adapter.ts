@@ -6605,7 +6605,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             request: Effect.Effect<AcpAdapterV2UserInputRequest>,
             transportRequestId: string,
           ) {
-            if (!(yield* awaitRequestTurn(generation))) {
+            if (latestRuntimePolicy.panel !== undefined || !(yield* awaitRequestTurn(generation))) {
               return { answers: null, acknowledgeNativeResponse: Effect.void };
             }
             return yield* runRuntimeCallbackAtGeneration(
@@ -7316,14 +7316,22 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (clientFileSystem !== undefined) {
             yield* targetRuntime.handleReadTextFile((request) =>
               clientPolicyContext.pipe(
-                Effect.flatMap(({ policy }) => clientFileSystem.readTextFile(request, policy.cwd)),
+                Effect.flatMap(({ policy }) =>
+                  policy.panel?.role === "panelist"
+                    ? denyClientRequest("fs/read_text_file", "deny")
+                    : clientFileSystem.readTextFile(request, policy.cwd),
+                ),
               ),
             );
             const writeTextFile = clientFileSystem.writeTextFile;
             if (writeTextFile !== undefined) {
               yield* targetRuntime.handleWriteTextFile((request) =>
                 clientPolicyContext.pipe(
-                  Effect.flatMap(({ policy }) => writeTextFile(request, policy.cwd)),
+                  Effect.flatMap(({ policy }) =>
+                    policy.panel !== undefined
+                      ? denyClientRequest("fs/write_text_file", "deny")
+                      : writeTextFile(request, policy.cwd),
+                  ),
                 ),
               );
             }
@@ -7384,10 +7392,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const dispositionFor = (
                 policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
                 request: EffectAcpSchema.RequestPermissionRequest = params,
-              ) => (flavor.permissionDisposition ?? acpPermissionDisposition)(policy, request);
+              ) => {
+                const disposition = (flavor.permissionDisposition ?? acpPermissionDisposition)(
+                  policy,
+                  request,
+                );
+                return policy.panel !== undefined && disposition === "ask" ? "deny" : disposition;
+              };
+              const panel = latestRuntimePolicy.panel !== undefined;
               if (
-                (followsAgentWorkState && dispositionFor(latestRuntimePolicy) === "ask") ||
-                (postSettleContinuationEnabled && flavor.wakeOnDetachedRequest)
+                !panel &&
+                ((followsAgentWorkState && dispositionFor(latestRuntimePolicy) === "ask") ||
+                  (postSettleContinuationEnabled && flavor.wakeOnDetachedRequest))
               ) {
                 if (!(yield* awaitRequestTurn(handlerGeneration)))
                   return { outcome: { outcome: "cancelled" } } as const;
@@ -7395,9 +7411,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const admitted = yield* runRuntimeCallbackAtGeneration(
                 handlerGeneration,
                 Effect.gen(function* () {
-                  const context = followsAgentWorkState
-                    ? yield* Ref.get(activeTurn)
-                    : yield* activeContext;
+                  const context =
+                    followsAgentWorkState || panel
+                      ? yield* Ref.get(activeTurn)
+                      : yield* activeContext;
                   // Kiro sends the tool's kind on its `tool_call` and leaves it
                   // off the permission request for that call; take it from the
                   // tool already seen under the same id so policy can tell a
@@ -7536,9 +7553,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 const mcpApprovalDisposition = yield* runRuntimeCallbackAtGeneration(
                   handlerGeneration,
                   Effect.gen(function* () {
-                    const context = yield* activeContext;
+                    const policy =
+                      latestRuntimePolicy.panel !== undefined
+                        ? latestRuntimePolicy
+                        : (yield* activeContext).input.runtimePolicy;
                     const disposition = acpMcpToolApprovalElicitationDisposition(
-                      context.input.runtimePolicy,
+                      policy,
                       params,
                       transportRequestId,
                     );
@@ -7561,6 +7581,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 if (mcpApprovalDisposition.value === "allow") {
                   return { action: "accept", content: {} } as const;
                 }
+                if (mcpApprovalDisposition.value === "deny") {
+                  return { action: "decline" } as const;
+                }
               }
               if (
                 params.mode === "url" &&
@@ -7582,13 +7605,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       transportRequestId,
                       nativeResponseAcknowledgement,
                     );
-                    const accepted = yield* (
-                      flavor.onUrlElicitation?.({
-                        elicitationId,
-                        url,
-                        message: params.message,
-                      }) ?? Effect.succeed(false)
-                    );
+                    const accepted =
+                      latestRuntimePolicy.panel === undefined &&
+                      (yield* (
+                        flavor.onUrlElicitation?.({
+                          elicitationId,
+                          url,
+                          message: params.message,
+                        }) ?? Effect.succeed(false)
+                      ));
                     return accepted
                       ? ({ action: "accept" } as const)
                       : ({ action: "decline" } as const);

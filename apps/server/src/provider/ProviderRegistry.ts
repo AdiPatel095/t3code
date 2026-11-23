@@ -131,13 +131,13 @@ export class ProviderRegistry extends Context.Service<
 >()("t3/provider/ProviderRegistry") {}
 
 const loadProviders = (
-  providerSources: ReadonlyArray<ProviderSnapshotSource>,
+  instances: ReadonlyArray<ProviderInstance>,
 ): Effect.Effect<ReadonlyArray<ServerProvider>> =>
   Effect.forEach(
-    providerSources,
-    (providerSource) =>
-      providerSource.getSnapshot.pipe(
-        Effect.flatMap((snapshot) => correlateSnapshotWithSource(providerSource, snapshot)),
+    instances,
+    (instance) =>
+      instance.snapshot.getSnapshot.pipe(
+        Effect.flatMap((snapshot) => correlateSnapshotWithSource(instance, snapshot)),
       ),
     {
       concurrency: "unbounded",
@@ -404,26 +404,40 @@ const haveProvidersChanged = (
   nextProviders: ReadonlyArray<ServerProvider>,
 ): boolean => !Equal.equals(previousProviders, nextProviders);
 
-const correlateSnapshotWithSource = (
-  source: ProviderSnapshotSource,
-  snapshot: ServerProvider,
-): Effect.Effect<ServerProvider> => {
-  if (snapshot.instanceId !== source.instanceId) {
-    return Effect.die(
-      new Error(
-        `Provider snapshot instance mismatch: source '${source.instanceId}' emitted '${snapshot.instanceId}'.`,
-      ),
+const correlateSnapshotWithSource = Effect.fn("ProviderRegistry.correlateSnapshotWithSource")(
+  function* (instance: ProviderInstance, snapshot: ServerProvider) {
+    if (snapshot.instanceId !== instance.instanceId) {
+      return yield* Effect.die(
+        new Error(
+          `Provider snapshot instance mismatch: source '${instance.instanceId}' emitted '${snapshot.instanceId}'.`,
+        ),
+      );
+    }
+    if (snapshot.driver !== instance.driverKind) {
+      return yield* Effect.die(
+        new Error(
+          `Provider snapshot driver mismatch for instance '${instance.instanceId}': source '${instance.driverKind}' emitted '${snapshot.driver}'.`,
+        ),
+      );
+    }
+    const cap = yield* Effect.suspend(() => instance.orchestrationAdapter.getCapabilities()).pipe(
+      Effect.map((capabilities) => capabilities.runtimePolicy.panelChat),
+      Effect.catchDefect(() => Effect.undefined),
+      Effect.orElseSucceed(() => undefined),
     );
-  }
-  if (snapshot.driver !== source.driverKind) {
-    return Effect.die(
-      new Error(
-        `Provider snapshot driver mismatch for instance '${source.instanceId}': source '${source.driverKind}' emitted '${snapshot.driver}'.`,
-      ),
-    );
-  }
-  return Effect.succeed(snapshot);
-};
+    const { panelChat: _panelChat, ...provider } = snapshot;
+    return cap === undefined
+      ? provider
+      : {
+          ...provider,
+          panelChat: {
+            panelist: true,
+            codeAgent: cap.readOnly === "enforced",
+            panelistToolsRemoved: cap.panelistToolsRemoved === true,
+          },
+        };
+  },
+);
 
 const snapshotInstanceKey = (provider: ServerProvider): ProviderInstanceId => {
   return provider.instanceId;
@@ -458,7 +472,7 @@ export const layer = Layer.effect(
 
     const bootInstances = yield* instanceRegistry.listInstances;
     const bootSources = bootInstances.map(buildSnapshotSource);
-    const fallbackProviders = yield* loadProviders(bootSources);
+    const fallbackProviders = yield* loadProviders(bootInstances);
     const fallbackByInstance = new Map<ProviderInstanceId, ServerProvider>();
     for (let index = 0; index < fallbackProviders.length; index++) {
       const provider = fallbackProviders[index];
@@ -740,7 +754,7 @@ export const layer = Layer.effect(
         return yield* Ref.get(providersRef);
       }
       const nextProvider = yield* probe;
-      return yield* correlateSnapshotWithSource(providerSource, nextProvider).pipe(
+      return yield* correlateSnapshotWithSource(instance, nextProvider).pipe(
         Effect.flatMap(syncProvider),
       );
     });
@@ -1021,7 +1035,7 @@ export const layer = Layer.effect(
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
-            correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
+            correlateSnapshotWithSource(instance, provider).pipe(Effect.flatMap(syncProvider)),
           ).pipe(Effect.forkScoped);
           if (instance.workspaceRescans) {
             yield* Stream.runForEach(instance.workspaceRescans, (cwd) =>
@@ -1044,7 +1058,7 @@ export const layer = Layer.effect(
               ) {
                 return yield* refreshCompatibility;
               }
-              yield* correlateSnapshotWithSource(source, provider).pipe(
+              yield* correlateSnapshotWithSource(instance, provider).pipe(
                 Effect.flatMap(syncProvider),
               );
             }).pipe(Effect.ignoreCause({ log: true })),

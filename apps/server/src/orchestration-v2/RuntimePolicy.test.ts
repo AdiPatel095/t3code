@@ -4,6 +4,7 @@ import {
   type ManagedPolicySummary,
   type ModelSelection,
   type OrchestrationV2AppThread,
+  type OrchestrationV2PanelTurnKind,
   ProjectId,
   ProviderInstanceId,
   type RuntimeMode,
@@ -219,6 +220,61 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
     }),
   );
 });
+
+it.effect.each([
+  { name: "project policy", layer: layerTest, cwd: "/project-root" },
+  { name: "default policy", layer: RuntimePolicy.layer, cwd: null },
+])("resolves the readonly panel roles under the $name", ({ layer, cwd }) =>
+  Effect.gen(function* () {
+    const policy = yield* RuntimePolicy.RuntimePolicyV2;
+    const thread = {
+      ...makeThread({ now: yield* DateTime.now, worktreePath: null }),
+      interactionMode: "plan",
+    } as const;
+    const panel: NonNullable<OrchestrationV2AppThread["panel"]> = {
+      participants: [],
+      rounds: 1,
+      status: "idle",
+      idleReason: "stopped",
+      run: null,
+      queue: [],
+      current: null,
+      pendingPost: null,
+      cursor: null,
+      lookupsThisRound: 0,
+      turnCount: 0,
+    };
+    const resolve = (panelTurnKind?: OrchestrationV2PanelTurnKind) =>
+      policy.resolve({
+        thread: { ...thread, panel },
+        modelSelection,
+        ...(panelTurnKind === undefined ? {} : { panelTurnKind }),
+      });
+    for (const [kind, role] of [
+      ["reply", "panelist"],
+      ["conclusion", "panelist"],
+      ["lookup", "code_agent"],
+      [undefined, "code_agent"],
+    ] as const) {
+      const resolved = yield* resolve(kind);
+      assert.deepEqual(resolved.panel, { role });
+      assert.deepEqual(resolved.sandboxPolicy, {
+        type: "readOnly",
+        access: { type: "fullAccess" },
+        networkAccess: false,
+      });
+      assert.include(resolved, {
+        cwd,
+        approvalPolicy: "never",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+      });
+    }
+    const ordinary = yield* policy.resolve({ thread, modelSelection });
+    assert.notProperty(ordinary, "panel");
+    assert.include(ordinary, { runtimeMode: "full-access", interactionMode: "plan" });
+  }).pipe(Effect.provide(layer)),
+);
 
 it.layer(layerTaskFolderPolicy)("RuntimePolicyV2 in a task folder", (it) => {
   it.effect("reaches the task folder's worktrees, never the checkouts they were made from", () =>
