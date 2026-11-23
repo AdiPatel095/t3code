@@ -10,6 +10,7 @@ import {
 } from "@t3tools/shared/threadLinks";
 import { unknownThreadLinkLabel } from "@t3tools/shared/threadLinksCopy";
 import { resolveLinkedThreadOpen } from "@t3tools/client-runtime/linked-thread";
+import { sideThreadKindOf } from "@t3tools/client-runtime/side-thread";
 
 import { configuredHostedAppUrl } from "../../hostedPairing";
 import { useThreadRefs, useThreadShell } from "../../state/entities";
@@ -116,7 +117,7 @@ export function MarkdownThreadLink(props: {
               }
               aria-label={gt("Thread, {title}", { title })}
             >
-              {written?.source.panel ? <UsersRoundIcon /> : <MessagesSquareIcon />}
+              {sideThreadKindOf(written) === "panel" ? <UsersRoundIcon /> : <MessagesSquareIcon />}
               <ContextChipLabel>{title}</ContextChipLabel>
             </ContextChip>
           }
