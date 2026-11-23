@@ -138,10 +138,18 @@ Agents without OAuth support cannot connect.
 A bot that supports MCP Events (`io.modelcontextprotocol/events`) can learn
 when something happens without reading threads over and over: a turn ended, an
 agent waits on a person, a guest asked something, a watched pull request woke
-its thread. Each of these is an event type it can poll or stream, narrowed to
-projects or threads. The environment keeps its latest 1,000 milestones in
-memory, so a bot that was away longer, or reconnects after a restart, is told
-some may be missing and should reread the threads it cares about.
+its thread. Each of these is an event type it can poll, stream, or receive by
+webhook, narrowed to projects or threads. The environment keeps its latest 1,000
+milestones in memory, so a bot that was away longer, or reconnects after a
+restart, is told some may be missing and should reread the threads it cares
+about.
+
+Webhooks go only to public `https` addresses, and a subscription lasts at most a
+day before the bot must renew it. Signing the bot out ends its subscriptions. To
+test with a receiver on your own machine or network, start the environment with
+`T3CODE_MCP_WEBHOOK_ALLOWED_HOSTS` set to its host names, for example
+`T3CODE_MCP_WEBHOOK_ALLOWED_HOSTS=localhost,127.0.0.1`; those hosts may also use
+plain `http`.
 
 ## Scripts on the host
 

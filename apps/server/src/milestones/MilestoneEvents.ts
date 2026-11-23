@@ -1,14 +1,18 @@
 import {
+  AuthSessionId,
   type MilestoneEvent as MilestoneEventValue,
   MilestoneEvent,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import type { McpServer } from "effect/ai";
+import { McpSchema, type McpServer } from "effect/ai";
 
+import * as SessionStore from "../auth/SessionStore.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as MilestoneHub from "./MilestoneHub.ts";
 
 // Matches the hub's buffer, so a poll can drain everything it keeps at once.
@@ -39,11 +43,31 @@ const occurrence = ({ event }: MilestoneHub.PositionedMilestone) => ({
 });
 
 /**
- * Each milestone type as an MCP event type (SEP-3415), for outside clients to poll or stream.
- * Cursors are the hub's, so a client that was away catches up on what the hub still keeps.
+ * Each milestone type as an MCP event type (SEP-3415), for outside clients to poll, stream or
+ * receive by webhook. Cursors are the hub's, so a client that was away catches up on what the
+ * hub still keeps.
  */
 export const make = Effect.gen(function* () {
   const hub = yield* MilestoneHub.MilestoneHub;
+  const sessions = yield* Effect.serviceOption(SessionStore.SessionStore);
+  // A webhook subscription outlives its request, so it ends itself when the client's session does.
+  const untilRevoked = Effect.fnUntraced(function* <A>(items: Stream.Stream<A>) {
+    const scope = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
+    const sessionId = Option.getOrUndefined(scope)?.client?.sessionId;
+    if (sessionId === undefined || Option.isNone(sessions)) return items;
+    const revoked = sessions.value.awaitInvalidation(AuthSessionId.make(sessionId)).pipe(
+      Effect.ignore,
+      Effect.andThen(
+        Effect.fail(
+          new McpSchema.Forbidden({
+            message: "Access revoked",
+            data: { reason: "Access revoked" },
+          }),
+        ),
+      ),
+    );
+    return items.pipe(Stream.interruptWhen(revoked));
+  });
   return MilestoneEvent.members.map((payload) => {
     const type = payload.fields.type.literal;
     const filterOf = (args: typeof Parameters.Type) => ({ ...args, types: [type] });
@@ -61,22 +85,29 @@ export const make = Effect.gen(function* () {
             limit: Math.min(request.maxEvents ?? DEFAULT_EVENTS, MAX_EVENTS),
           })
           .pipe(Effect.map((page) => ({ ...page, events: page.events.map(occurrence) }))),
-      stream: (args, request) =>
-        hub
-          .follow({ cursor: request.cursor, maxAgeMs: request.maxAgeMs, filter: filterOf(args) })
-          .pipe(
-            Effect.map(({ cursor, truncated, items }) => ({
-              cursor,
-              truncated,
-              items: items.pipe(
-                Stream.map((item): McpServer.EventStreamItem<MilestoneEventValue> =>
-                  item._tag === "Milestone"
-                    ? { _tag: "Event", cursor: item.cursor, ...occurrence(item) }
-                    : item,
-                ),
+      stream: Effect.fn("MilestoneEvents.stream")(function* (
+        args: typeof Parameters.Type,
+        request: McpServer.EventStreamRequest,
+      ) {
+        const { cursor, truncated, items } = yield* hub.follow({
+          cursor: request.cursor,
+          maxAgeMs: request.maxAgeMs,
+          filter: filterOf(args),
+        });
+        return {
+          cursor,
+          truncated,
+          items: yield* untilRevoked(
+            items.pipe(
+              Stream.map((item): McpServer.EventStreamItem<MilestoneEventValue> =>
+                item._tag === "Milestone"
+                  ? { _tag: "Event", cursor: item.cursor, ...occurrence(item) }
+                  : item,
               ),
-            })),
+            ),
           ),
+        };
+      }),
     } satisfies McpServer.EventOptions<typeof Parameters, typeof payload, never>;
   });
 });
