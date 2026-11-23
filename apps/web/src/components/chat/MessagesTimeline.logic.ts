@@ -652,6 +652,7 @@ type MessagesTimelineRowContent =
       createdAt: string;
       message: ChatMessage;
       projectedItem?: OrchestrationV2ProjectedTurnItem;
+      panelAuthor?: string;
       showAssistantMeta: boolean;
       suppressEmptyResponse?: boolean;
       showAssistantCopyButton: boolean;
@@ -699,6 +700,7 @@ type MessagesTimelineRowContent =
       id: string;
       createdAt: string;
       text: string;
+      panelAuthor?: string;
     }
   | {
       kind: "mcp-app";
@@ -1736,7 +1738,17 @@ function insertPanelRows(
         ...(askedBy === undefined ? {} : { askedBy }),
       });
     }
-    if (!marker) group.push(row);
+    if (marker) continue;
+    if (
+      (row.kind === "message" && row.message.role === "assistant") ||
+      row.kind === "sent-message"
+    ) {
+      const { speaker } = annotation;
+      const panelAuthor = speaker.role === "code_agent" ? resolve(msg("Code agent")) : speaker.name;
+      group.push({ ...row, panelAuthor });
+    } else {
+      group.push(row);
+    }
   }
 
   for (const [runId, group] of groups) {
@@ -3018,7 +3030,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "sent-message": {
       const bs = b as typeof a;
-      return a.createdAt === bs.createdAt && a.text === bs.text;
+      return a.createdAt === bs.createdAt && a.text === bs.text && a.panelAuthor === bs.panelAuthor;
     }
 
     case "mcp-app": {
@@ -3079,6 +3091,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return (
         a.message === bm.message &&
         a.projectedItem === bm.projectedItem &&
+        a.panelAuthor === bm.panelAuthor &&
         a.showAssistantMeta === bm.showAssistantMeta &&
         a.suppressEmptyResponse === bm.suppressEmptyResponse &&
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&

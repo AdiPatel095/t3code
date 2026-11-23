@@ -459,6 +459,42 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       ]);
     });
 
+    it("keeps a live runless panel post appended to the latest run's range", () => {
+      const reply = runItem("item-panel-reply", steerRunId, 3_000_002);
+      const projection = windowOf([run, steerRun], [reply]);
+      const post = {
+        id: TurnItemId.make("item-panel-post"),
+        threadId,
+        type: "user_message",
+        createdBy: "user",
+        creationSource: "server",
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 3_000_003,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        messageId: MessageId.make("message-panel-post"),
+        text: "Follow-up",
+        attachments: [],
+        inputIntent: "turn_start",
+      } satisfies OrchestrationV2TurnItem;
+
+      const next = applyOrchestrationV2ProjectionEvent(projection, itemEvent(post), {
+        partialTimeline: true,
+        latestLocalTurnOrdinal: reply.ordinal,
+      });
+
+      expect(next?.visibleTurnItems.map((row) => row.item.id)).toEqual([reply.id, post.id]);
+      expect(next?.turnItems).toContainEqual(post);
+    });
+
     it.each([
       { name: "keeps an item of a run already in the window", itemRunId: steerRunId, kept: true },
       { name: "drops an item of a finished run outside the window", itemRunId: runId, kept: false },

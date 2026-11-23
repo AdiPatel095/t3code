@@ -642,6 +642,7 @@ it.effect(
         assert.lengthOf(items, 2);
         assert.include(items[0], {
           runId: null,
+          ordinal: 1,
           createdBy: "user",
           text: createPanel.topic.trim(),
         });
@@ -713,6 +714,7 @@ it.effect("keeps just the latest post as the next queue while storing every post
       yield* dispatchClient(createPanel);
       const refused = yield* continuePanel("command:continue-running").pipe(Effect.flip);
       assert.equal(userFacingDispatchErrorMessage(refused), "This panel chat is already running.");
+      const beforeRunningPost = yield* orchestrator.getThreadProjection(panelThreadId);
       yield* postPanel("message:open-post", "Continue in order.");
       yield* postPanel("message:addressed-post", " @panel-model-2 What about retries? ");
       const pending = yield* orchestrator.getThreadProjection(panelThreadId);
@@ -742,6 +744,29 @@ it.effect("keeps just the latest post as the next queue while storing every post
       const answered = yield* orchestrator.getThreadProjection(panelThreadId);
       assert.lengthOf(answered.runs, 2);
       assert.equal(answered.thread.panel?.idleReason, "answered");
+
+      yield* postPanel("message:idle-post", "One more question.");
+      const reopened = yield* orchestrator.getThreadProjection(panelThreadId);
+      const runOrdinals = (projection: typeof pending, runIndex: number) =>
+        projection.turnItems
+          .filter((item) => item.runId === projection.runs[runIndex]!.id)
+          .map((item) => item.ordinal);
+      const postOrdinal = (projection: typeof pending, id: string) =>
+        projection.turnItems.find(
+          (item) => item.type === "user_message" && item.runId === null && item.messageId === id,
+        )!.ordinal;
+      const runningPost = postOrdinal(pending, "message:open-post");
+      const idlePost = postOrdinal(reopened, "message:idle-post");
+      assert.deepEqual(
+        [runningPost, postOrdinal(pending, "message:addressed-post"), idlePost],
+        [
+          Math.max(...runOrdinals(beforeRunningPost, 0)) + 1,
+          Math.max(...runOrdinals(beforeRunningPost, 0)) + 2,
+          Math.max(...runOrdinals(answered, 1)) + 1,
+        ],
+      );
+      assert.isBelow(runningPost, Math.min(...runOrdinals(next, 1)));
+      assert.isBelow(idlePost, Math.min(...runOrdinals(reopened, 2)));
     }).pipe(Effect.provide(fixture.layer));
   }),
 );

@@ -558,6 +558,89 @@ describe("panel thread feed", () => {
     );
   });
 
+  it.each([false, true])(
+    "interleaves runless posts with panel runs in transcript order (working=%s)",
+    (isWorking) => {
+      const nextRun = RunId.make("next-panel-run");
+      const topic = { ...userMessage(), runId: null, ordinal: 1, creationSource: "web" as const };
+      const post = {
+        ...userMessage("2026-06-20T00:00:04.000Z"),
+        id: TurnItemId.make("post-item"),
+        messageId: MessageId.make("post"),
+        runId: null,
+        ordinal: 1_000_003,
+        text: "A follow-up",
+        creationSource: "server" as const,
+      };
+      const firstMarker = {
+        ...userMessage("2026-06-20T00:00:02.000Z"),
+        id: TurnItemId.make("first-marker-item"),
+        messageId: MessageId.make(`message:panel:${threadId}:turn:1`),
+        ordinal: 1_000_001,
+        text: "",
+        panelParticipantId: panelist.id,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+      };
+      const nextMarker = {
+        ...firstMarker,
+        ...base("next-marker-item", "2026-06-20T00:00:05.000Z", 2_000_001),
+        messageId: MessageId.make(`message:panel:${threadId}:turn:2`),
+        runId: nextRun,
+      };
+      const firstReply = {
+        ...assistantMessage(),
+        ordinal: 1_000_002,
+        phase: "final_answer" as const,
+      };
+      const nextReply = {
+        ...assistantMessage("2026-06-20T00:00:06.000Z"),
+        id: TurnItemId.make("next-reply-item"),
+        messageId: MessageId.make("next-reply"),
+        runId: nextRun,
+        ordinal: 2_000_002,
+        ...(isWorking ? { status: "running" as const, streaming: true, completedAt: null } : {}),
+      };
+      const latestRun = isWorking
+        ? {
+            runId: nextRun,
+            status: "running" as const,
+            startedAt: "2026-06-20T00:00:05.000Z",
+            completedAt: null,
+          }
+        : null;
+      const rows = derivePanelThreadFeed(
+        deriveThreadFeedPresentation(
+          buildThreadFeed(
+            [topic, firstMarker, firstReply, post, nextMarker, nextReply].map((item, index) =>
+              projected(item, index),
+            ),
+          ),
+          latestRun,
+          new Set(),
+          new Set(),
+          latestRun?.startedAt ?? null,
+          false,
+          undefined,
+          display,
+        ),
+        panelTimelineAnnotations([panelRun(runId, 1), panelRun(nextRun, 2)], panel),
+      );
+      expect(
+        rows
+          .filter((row) => row.type === "message" || row.type === "panel-speaker")
+          .map((row) => row.id),
+      ).toEqual([
+        topic.messageId,
+        `panel-speaker:${runId}`,
+        firstReply.messageId,
+        post.messageId,
+        `panel-speaker:${nextRun}`,
+        nextReply.messageId,
+      ]);
+    },
+  );
+
   it("orders pass, failure, lookup limit, timeout, and conclusion around their turns", () => {
     const failed = RunId.make("failed");
     const asking = RunId.make("asking");

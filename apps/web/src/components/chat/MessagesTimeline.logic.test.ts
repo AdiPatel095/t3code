@@ -5248,6 +5248,121 @@ describe("panel transcript rows", () => {
     };
   }
 
+  it.each([false, true])(
+    "keeps the topic, first reply and later post in transcript order (working=%s)",
+    (isWorking) => {
+      const { base, threadId, historyRunId, runId, time } = makeStreamingTimelineFixture();
+      const codeAgent = {
+        ...speaker,
+        id: "code",
+        name: "Lookup model",
+        handle: "code",
+        role: "code_agent" as const,
+      };
+      const userItem = (
+        id: string,
+        run: RunId | null,
+        text: string,
+        ordinal: number,
+        at: number,
+      ) => ({
+        ...base(`turn-item:message:${encodeURIComponent(id)}`, runId, at),
+        type: "user_message" as const,
+        messageId: MessageId.make(id),
+        runId: run,
+        ordinal,
+        text,
+        attachments: [],
+        inputIntent: "turn_start" as const,
+        creationSource: id === "topic" ? ("web" as const) : ("server" as const),
+        ...(run === null
+          ? { createdBy: "user" as const }
+          : {
+              createdBy: "agent" as const,
+              panelParticipantId: run === historyRunId ? speaker.id : codeAgent.id,
+            }),
+      });
+      const replyItem = (id: string, run: RunId, text: string, ordinal: number, at: number) => ({
+        ...base(id, run, at),
+        type: "assistant_message" as const,
+        phase: "final_answer" as const,
+        messageId: MessageId.make(id),
+        ordinal,
+        text,
+        streaming: false,
+      });
+      const firstMarker = userItem(
+        `message:panel:${threadId}:turn:1`,
+        historyRunId,
+        "",
+        1_000_001,
+        1,
+      );
+      const nextMarker = userItem(`message:panel:${threadId}:turn:2`, runId, "", 2_000_001, 4);
+      const items = [
+        userItem("topic", null, "Topic", 1, 0),
+        firstMarker,
+        replyItem("first-reply", historyRunId, "First reply", 1_000_002, 2),
+        userItem("post", null, "A follow-up", 1_000_003, 3),
+        nextMarker,
+        {
+          ...replyItem("next-reply", runId, "Next reply", 2_000_002, 5),
+          ...(isWorking ? { status: "running" as const, streaming: true, completedAt: null } : {}),
+        },
+      ];
+      const entries = deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: items.map((item, position) => ({
+          position,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        })),
+        optimisticMessages: [],
+      });
+      const annotations = panelTimelineAnnotations(
+        [historyRunId, runId].map((id, index) => ({
+          id,
+          ordinal: index + 1,
+          requestedAt: DateTime.makeUnsafe(time(index === 0 ? 1 : 4)),
+          panelTurn: {
+            participantId: index === 0 ? speaker.id : codeAgent.id,
+            kind: index === 0 ? "reply" : "lookup",
+            round: 1,
+            totalRounds: 1,
+            ...(index === 0 || !isWorking ? { outcome: "replied" as const } : {}),
+          },
+        })),
+        { participants: [speaker, codeAgent] },
+      );
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries: entries,
+        panelAnnotations: annotations,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        runningRunId: isWorking ? runId : null,
+        isWorking,
+      });
+      expect(
+        rows.flatMap((row) =>
+          row.kind === "message" ? [row.message.id] : row.kind === "panel-speaker" ? [row.id] : [],
+        ),
+      ).toEqual([
+        "topic",
+        `panel-speaker:${historyRunId}`,
+        "first-reply",
+        "post",
+        `panel-speaker:${runId}`,
+        "next-reply",
+      ]);
+      expect(
+        rows.flatMap((row) =>
+          row.kind === "message" && row.message.role === "assistant" ? [row.panelAuthor] : [],
+        ),
+      ).toEqual([speaker.name, "Code agent"]);
+    },
+  );
+
   it("replaces fresh-session and model-switch markers, and keeps a queued post after its speaker's reply", () => {
     const { runId, entries, time } = panelTimeline();
     const annotations = panelTimelineAnnotations(
