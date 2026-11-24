@@ -100,8 +100,27 @@ export function withCreationProvenance(
       } = command;
       return { ...rest, ...provenance };
     }
+    // Only the server can attribute a panel command to an agent or stamp a link's origin.
+    case "panel.create": {
+      const {
+        senderThreadId: _sender,
+        linkedSender: _linked,
+        linkOrigin: _origin,
+        ...rest
+      } = command;
+      return { ...rest, ...provenance };
+    }
+    case "panel.post":
+    case "panel.continue": {
+      const {
+        createdBy: _actor,
+        senderThreadId: _sender,
+        linkedSender: _linked,
+        ...rest
+      } = command;
+      return rest;
+    }
     case "message.dispatch":
-    case "panel.create":
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request":

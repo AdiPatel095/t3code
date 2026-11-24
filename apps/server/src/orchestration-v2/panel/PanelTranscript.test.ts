@@ -12,6 +12,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import { expect, it } from "vite-plus/test";
 
+import { buildPanelPrompt } from "./PanelPromptBuilder.ts";
 import { panelTranscript } from "./PanelTranscript.ts";
 
 const threadId = ThreadId.make("panel-transcript");
@@ -129,6 +130,34 @@ it("orders entries by message time then turn ordinal, with one entry per partici
       { type: "message", from: "user", text: "The post that started this turn.", cutOff: false },
     ],
   });
+});
+
+it("builds the same panelist prompt for agent and person attribution", () => {
+  const messages = [
+    message("topic", 0, "What should we build?"),
+    message("post", 5, "Consider the existing implementation."),
+  ];
+  const current = run(1, {}, "running");
+  const prompt = (messages: ReadonlyArray<OrchestrationV2ConversationMessage>) =>
+    buildPanelPrompt({
+      ...panelTranscript({
+        panel,
+        topicMessageId,
+        messages,
+        runs: [current],
+        beforeRunId: current.id,
+      }),
+      panel,
+      participant: panel.participants[0]!,
+      turn: current.panelTurn!,
+    });
+  const agentMessages = messages.map((message): OrchestrationV2ConversationMessage => ({
+    ...message,
+    createdBy: "agent",
+    creationSource: "mcp",
+    senderThreadId: ThreadId.make("agent-sender"),
+  }));
+  expect(prompt(agentMessages)).toBe(prompt(messages));
 });
 
 it("adds outcome notes and retains timed-out, stopped and interrupted partial replies", () => {

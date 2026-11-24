@@ -90,6 +90,8 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
+  PANEL_AGENT_RUNNING_PER_PARENT,
+  PANEL_AGENT_RUNS_IN_A_ROW,
   PANEL_MAX_ROUNDS,
   PANEL_MIN_ROUNDS,
   PANEL_TEXT_MAX_CHARS,
@@ -15882,21 +15884,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       readonly id: MessageId;
       readonly text: string;
       readonly creationSource: OrchestrationV2AppThread["creationSource"];
+      readonly createdBy: OrchestrationV2ConversationMessage["createdBy"];
+      readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
+      readonly linkedSender?: OrchestrationV2ConversationMessage["linkedSender"];
     },
     now: DateTime.Utc,
   ) {
+    const { createdBy, senderThreadId, linkedSender, ...content } = message;
     const emitEvent = emit(events, command);
     yield* emitEvent({
       type: "message.updated",
       threadId: thread.id,
       occurredAt: now,
       payload: {
-        ...message,
+        ...content,
         threadId: thread.id,
         runId: null,
         nodeId: null,
         role: "user",
-        createdBy: "user",
+        createdBy,
+        ...(senderThreadId === undefined ? {} : { senderThreadId }),
+        ...(linkedSender === undefined ? {} : { linkedSender }),
         attachments: [],
         streaming: false,
         createdAt: now,
@@ -15908,7 +15916,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       threadId: thread.id,
       occurredAt: now,
       payload: {
-        createdBy: "user",
+        createdBy,
         creationSource: message.creationSource,
         id: idAllocator.derive.userTurnItem({ messageId: message.id }),
         threadId: thread.id,
@@ -16052,6 +16060,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (orchestrationV2WorktreePending(parent.worktreePath, sourceProjection.runs)) {
       return yield* reject("Start the panel chat once this thread's worktree is set up.");
     }
+    const agent = command.createdBy === "agent";
+    if (agent) {
+      let running = 0;
+      for (const childId of yield* liveSideChatIds(parent.id)) {
+        const child = yield* findThread(childId);
+        if (child?.panel?.status !== "running" || child.createdBy !== "agent") continue;
+        running += 1;
+        if (running >= PANEL_AGENT_RUNNING_PER_PARENT) {
+          return yield* reject(
+            "This thread already has 2 agent-started panel chats running. Wait for one to finish or stop it.",
+          );
+        }
+      }
+    }
     const sourceRun = latestStableRun(sourceProjection);
     const now = command.createdAt ?? (yield* DateTime.now);
     const transferId = yield* idAllocator.allocate
@@ -16098,9 +16120,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       cursor: null,
       lookupsThisRound: 0,
       turnCount: 0,
+      ...(agent ? { agentRunsInARow: 1 } : {}),
     };
     const thread: OrchestrationV2AppThread = {
       ...targetThread,
+      ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
       title,
       titleRenamed: false,
       titleRegeneration: { requestId: command.commandId, startedAt: now },
@@ -16134,7 +16158,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       {
         id: command.topicMessageId,
         text: command.topic,
-        creationSource: command.creationSource,
+        creationSource: agent ? "mcp" : command.creationSource,
+        createdBy: agent ? "agent" : "user",
+        ...(agent
+          ? { senderThreadId: command.senderThreadId, linkedSender: command.linkedSender }
+          : {}),
       },
       now,
     );
@@ -16168,30 +16196,57 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.type === "panel.continue") {
       if (panel.status === "running") return yield* reject("This panel chat is already running.");
       if (panel.current !== null) return yield* reject("This panel chat is still stopping.");
-      yield* startPanelTurn(command, projection, openRunOfRounds(panel), events, effects);
-      return;
     }
-    const text = command.text.trim();
-    if (text.length === 0) return yield* reject("Enter a message.");
-    if (text.length > PANEL_TEXT_MAX_CHARS) {
-      return yield* reject("Keep panel messages under 8,000 characters.");
+    const agent = command.createdBy === "agent";
+    const previousCount = panel.agentRunsInARow ?? 0;
+    if (agent && previousCount >= PANEL_AGENT_RUNS_IN_A_ROW) {
+      return yield* reject(
+        "This panel has had 4 agent-started runs in a row. A person must continue it in T3 Code, or start a new panel.",
+      );
     }
-    yield* emitPanelUserMessage(
+    let decision: PanelDecision;
+    if (command.type === "panel.continue") {
+      decision = openRunOfRounds(panel);
+    } else {
+      const text = command.text.trim();
+      if (text.length === 0) return yield* reject("Enter a message.");
+      if (text.length > PANEL_TEXT_MAX_CHARS) {
+        return yield* reject("Keep panel messages under 8,000 characters.");
+      }
+      yield* emitPanelUserMessage(
+        command,
+        events,
+        thread,
+        {
+          id: command.messageId,
+          text,
+          creationSource: agent ? "mcp" : "server",
+          createdBy: agent ? "agent" : "user",
+          ...(agent
+            ? { senderThreadId: command.senderThreadId, linkedSender: command.linkedSender }
+            : {}),
+        },
+        yield* DateTime.now,
+      );
+      decision = recordPost(panel, {
+        messageId: command.messageId,
+        mentionedParticipantIds: panelMentionedParticipantIds(text, panel.participants),
+      });
+    }
+    const agentRunsInARow = agent
+      ? previousCount + 1
+      : panel.agentRunsInARow === undefined
+        ? undefined
+        : 0;
+    yield* startPanelTurn(
       command,
+      projection,
+      agentRunsInARow === undefined
+        ? decision
+        : { ...decision, state: { ...decision.state, agentRunsInARow } },
       events,
-      thread,
-      {
-        id: command.messageId,
-        text,
-        creationSource: "server",
-      },
-      yield* DateTime.now,
+      effects,
     );
-    const decision = recordPost(panel, {
-      messageId: command.messageId,
-      mentionedParticipantIds: panelMentionedParticipantIds(text, panel.participants),
-    });
-    yield* startPanelTurn(command, projection, decision, events, effects);
   });
 
   const dispatchPanelSettle = Effect.fn("Orchestrator.dispatchPanelSettle")(function* (

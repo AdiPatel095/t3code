@@ -87,6 +87,55 @@ it("stamps authoritative provenance on commands that create threads or messages"
   expect(stamped).not.toHaveProperty("linkOrigin");
   expect(stamped).not.toHaveProperty("delegatedFrom");
   expect(stamped).not.toHaveProperty("initialMessage");
+
+  const provenance = { createdBy: "user", creationSource: "web" } as const;
+  const senderFields = { senderThreadId: command.threadId, linkedSender: command.delegatedFrom! };
+  const panelCreate = {
+    type: "panel.create",
+    commandId: command.commandId,
+    threadId: command.threadId,
+    parentThreadId: senderFields.senderThreadId,
+    participants: [],
+    rounds: 1,
+    topicMessageId: MessageId.make("message:thread-management:panel-topic"),
+    topic: "Panel topic",
+  } as const;
+  expect(
+    ThreadManagementService.withCreationProvenance(
+      {
+        ...panelCreate,
+        ...senderFields,
+        createdBy: "agent",
+        creationSource: "mcp",
+        linkOrigin: command.linkOrigin!,
+      },
+      provenance,
+    ),
+  ).toEqual({ ...panelCreate, ...provenance });
+
+  const panelContinue = {
+    type: "panel.continue",
+    commandId: command.commandId,
+    threadId: command.threadId,
+  } as const;
+  const panelPost = {
+    ...panelContinue,
+    type: "panel.post",
+    messageId: MessageId.make("message:thread-management:panel-post"),
+    text: "Panel post",
+  } as const;
+  for (const control of [panelPost, panelContinue]) {
+    expect(
+      ThreadManagementService.withCreationProvenance(
+        {
+          ...control,
+          ...senderFields,
+          createdBy: "agent",
+        },
+        provenance,
+      ),
+    ).toEqual(control);
+  }
 });
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(

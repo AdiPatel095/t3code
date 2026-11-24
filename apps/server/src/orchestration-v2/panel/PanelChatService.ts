@@ -1,8 +1,10 @@
 import {
   CommandId,
   isDelegatedAppThread,
+  NonNegativeInt,
   type OrchestrationV2Command,
   type OrchestrationV2PanelParticipant,
+  OrchestrationV2PanelRole,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import {
@@ -12,6 +14,7 @@ import {
 } from "@t3tools/shared/model";
 import {
   derivePanelHandle,
+  lowestPanelModelOptions,
   PANEL_CODE_HANDLE,
   PANEL_MAX_PANELISTS,
   PANEL_MAX_ROUNDS,
@@ -47,6 +50,9 @@ type PanelDispatch = Effect.Effect<
 export class PanelChatError extends Schema.TaggedError<PanelChatError>()("PanelChatError", {
   commandId: CommandId,
   message: TrimmedNonEmptyString,
+  participant: Schema.optional(
+    Schema.Struct({ role: OrchestrationV2PanelRole, index: NonNegativeInt }),
+  ),
 }) {}
 
 export class PanelChatService extends Context.Service<
@@ -80,8 +86,12 @@ const make = Effect.gen(function* () {
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
 
   const create = Effect.fn("PanelChatService.create")(function* (command: CreateCommand) {
-    const reject = (message: string) =>
-      new PanelChatError({ commandId: command.commandId, message });
+    const reject = (message: string, participant?: PanelChatError["participant"]) =>
+      new PanelChatError({
+        commandId: command.commandId,
+        message,
+        ...(participant === undefined ? {} : { participant }),
+      });
     // The command receipt owns replay even after the roster's providers or parent change.
     if (yield* threads.hasReceipt(command.commandId)) {
       return yield* orchestrator.dispatch({ ...command, type: "panel.open", participants: [] });
@@ -103,14 +113,13 @@ const make = Effect.gen(function* () {
     if (topic.length === 0) return yield* reject("Enter a topic.");
     if (topic.length > PANEL_TEXT_MAX_CHARS)
       return yield* reject("Keep the topic under 8,000 characters.");
-    if (
-      panelists.some((panelist, index) =>
-        panelists
-          .slice(0, index)
-          .some((other) => modelSelectionsEqual(panelist.modelSelection, other.modelSelection)),
-      )
-    ) {
-      return yield* reject("Already in this panel.");
+    const duplicate = panelists.findIndex((panelist, index) =>
+      panelists
+        .slice(0, index)
+        .some((other) => modelSelectionsEqual(panelist.modelSelection, other.modelSelection)),
+    );
+    if (duplicate !== -1) {
+      return yield* reject("Already in this panel.", { role: "panelist", index: duplicate });
     }
 
     const { thread: parent } = yield* threads.getThreadRecords(command.parentThreadId, []).pipe(
@@ -149,7 +158,12 @@ const make = Effect.gen(function* () {
       readonly instanceName: string;
       readonly effortLabel: string | undefined;
     }> = [];
-    for (const { role, modelSelection } of [...panelists, ...codeAgents]) {
+    for (const [index, { role, modelSelection }] of [
+      ...panelists.entries(),
+      ...codeAgents.entries(),
+    ]) {
+      const participantRef = { role, index };
+      const rejectProvider = () => reject(PROVIDER_UNAVAILABLE, participantRef);
       const provider = available.find(
         (candidate) => candidate.instanceId === modelSelection.instanceId,
       );
@@ -161,13 +175,13 @@ const make = Effect.gen(function* () {
           instanceId: provider.instanceId,
         }))
       ) {
-        return yield* reject(PROVIDER_UNAVAILABLE);
+        return yield* rejectProvider();
       }
       const adapter = yield* adapters
         .get(provider.instanceId)
-        .pipe(Effect.mapError(() => reject(PROVIDER_UNAVAILABLE)));
+        .pipe(Effect.mapError(rejectProvider));
       yield* requireAdvertisedModel(provider, modelSelection.model).pipe(
-        Effect.mapError(() => reject(PROVIDER_UNAVAILABLE)),
+        Effect.mapError(rejectProvider),
       );
       const model =
         provider.models.find((candidate) => candidate.slug === modelSelection.model) ??
@@ -176,33 +190,45 @@ const make = Effect.gen(function* () {
             (alias) => alias.toLowerCase() === modelSelection.model.toLowerCase(),
           ),
         );
-      if (model === undefined) return yield* reject(PROVIDER_UNAVAILABLE);
+      if (model === undefined) return yield* rejectProvider();
 
-      const capabilities = yield* adapter
-        .getCapabilities()
-        .pipe(Effect.mapError(() => reject(PROVIDER_UNAVAILABLE)));
+      const capabilities = yield* adapter.getCapabilities().pipe(Effect.mapError(rejectProvider));
       const capability = capabilities.runtimePolicy.panelChat;
       if (role === "code_agent" && capability?.readOnly !== "enforced") {
         return yield* reject(
           "This provider can't be limited to reading, so it can't be the code agent.",
+          participantRef,
         );
       }
-      if (capability === undefined) return yield* reject(PROVIDER_UNAVAILABLE);
+      if (capability === undefined) return yield* rejectProvider();
 
-      const selection = { ...modelSelection, model: model.slug };
+      const caps = model.capabilities ?? {};
+      const descriptors = getProviderOptionDescriptors({
+        caps,
+        selections: modelSelection.options,
+      });
+      const options =
+        command.createdBy === "agent" && modelSelection.options === undefined
+          ? lowestPanelModelOptions(descriptors)
+          : undefined;
+      const selection = {
+        ...modelSelection,
+        model: model.slug,
+        ...(options === undefined ? {} : { options }),
+      };
       if (
         role === "panelist" &&
         resolved.some(({ participant }) =>
           modelSelectionsEqual(participant.modelSelection, selection),
         )
       ) {
-        return yield* reject("Already in this panel.");
+        return yield* reject("Already in this panel.", participantRef);
       }
-      const descriptors = getProviderOptionDescriptors({
-        caps: model.capabilities ?? {},
-        selections: selection.options,
-      });
-      const reasoning = descriptors.find(
+      const selectedDescriptors =
+        options === undefined
+          ? descriptors
+          : getProviderOptionDescriptors({ caps, selections: options });
+      const reasoning = selectedDescriptors.find(
         (descriptor) =>
           descriptor.type === "select" &&
           (descriptor.role === "reasoning" || REASONING_OPTION_IDS.has(descriptor.id)),

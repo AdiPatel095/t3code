@@ -4,6 +4,7 @@ import {
   CheckpointId,
   CheckpointScopeId,
   CommandId,
+  EnvironmentId,
   EventId,
   isListedThreadLineage,
   MessageId,
@@ -638,6 +639,9 @@ it.effect(
             { id: run.userMessageId, text: "", runId: run.id, panelParticipantId: "p1" },
           ],
         );
+        const topic = projection.messages.find(({ id }) => id === createPanel.topicMessageId);
+        assert.include(topic, { createdBy: "user", creationSource: "web" });
+        assert.isUndefined(thread.panel?.agentRunsInARow);
         const items = projection.turnItems.filter((item) => item.type === "user_message");
         assert.lengthOf(items, 2);
         assert.include(items[0], {
@@ -669,6 +673,196 @@ it.effect(
         assert.equal(replay.sequence, opened.sequence);
       }).pipe(Effect.provide(fixture.layer));
     }),
+);
+
+it.effect.each(["post", "continue"] as const)(
+  "limits consecutive agent runs until a person's %s resets the count",
+  (action) =>
+    Effect.gen(function* () {
+      const fixture = yield* panelFixture;
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const panels = yield* PanelChat.PanelChatService;
+        const linkOrigin = { sessionId: "panel-link", label: "Linked environment" };
+        const linkedSender = {
+          environmentId: EnvironmentId.make("environment:panel-sender"),
+          threadId: ThreadId.make("thread:panel-sender"),
+          title: "Agent sender",
+        };
+        const post: Extract<OrchestrationV2Command, { type: "panel.post" }> = {
+          type: "panel.post",
+          commandId: CommandId.make("command:agent-panel-post"),
+          threadId: panelThreadId,
+          messageId: MessageId.make("message:agent-panel-post"),
+          text: "@panel-model Consider this option.",
+          createdBy: "agent",
+          linkedSender,
+        };
+        const agentContinue = (id: string) =>
+          panels.continue({
+            type: "panel.continue",
+            commandId: CommandId.make(id),
+            threadId: panelThreadId,
+            createdBy: "agent",
+          });
+        const stop = Effect.fn("PanelTest.stopAgentRun")(function* (id: string) {
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make(id),
+            threadId: panelThreadId,
+          });
+          yield* settleCurrent(false);
+        });
+        const count = () =>
+          orchestrator
+            .getThreadRecords(panelThreadId, [])
+            .pipe(Effect.map(({ thread }) => thread.panel?.agentRunsInARow));
+
+        yield* createParent(fixture.cwd);
+        yield* panels.create({
+          ...createPanel,
+          createdBy: "agent",
+          creationSource: "mcp",
+          senderThreadId: parentThreadId,
+          linkOrigin,
+          participants: [
+            panelist({ instanceId: codex, model }),
+            panelist(selection(codex, "high")),
+            codeAgent({ instanceId: codex, model: alternateModel }),
+          ],
+        });
+        const opened = yield* orchestrator.getThreadProjection(panelThreadId);
+        assert.deepEqual(opened.thread.linkOrigin, linkOrigin);
+        assert.equal(opened.thread.panel?.agentRunsInARow, 1);
+        assert.deepEqual(
+          opened.thread.panel?.participants.map(({ modelSelection }) => modelSelection),
+          [
+            selection(codex, "low"),
+            selection(codex, "high"),
+            { instanceId: codex, model: alternateModel },
+          ],
+        );
+        assert.deepEqual(opened.runs[0]?.modelSelection, selection(codex, "low"));
+        assert.include(
+          opened.messages.find(({ id }) => id === createPanel.topicMessageId),
+          {
+            createdBy: "agent",
+            creationSource: "mcp",
+            senderThreadId: parentThreadId,
+          },
+        );
+
+        yield* panels.post(post);
+        assert.isTrue((yield* panels.post(post)).replayed);
+        const posted = yield* orchestrator.getThreadProjection(panelThreadId);
+        assert.equal(posted.thread.panel?.agentRunsInARow, 2);
+        assert.deepInclude(
+          posted.messages.find(({ id }) => id === post.messageId),
+          {
+            createdBy: "agent",
+            creationSource: "mcp",
+            linkedSender,
+          },
+        );
+        assert.include(
+          posted.turnItems.find(
+            (item) => item.type === "user_message" && item.messageId === post.messageId,
+          ),
+          {
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        );
+        yield* panels.post({
+          ...post,
+          commandId: CommandId.make("command:second-agent-panel-post"),
+          messageId: MessageId.make("message:second-agent-panel-post"),
+        });
+        assert.equal(yield* count(), 3);
+        yield* settleCurrent();
+        yield* settleCurrent();
+        yield* agentContinue("command:agent-continue");
+        assert.isTrue((yield* agentContinue("command:agent-continue")).replayed);
+        assert.equal(yield* count(), 4);
+        const running = yield* agentContinue("command:agent-continue-running").pipe(Effect.flip);
+        assert.equal(
+          userFacingDispatchErrorMessage(running),
+          "This panel chat is already running.",
+        );
+        const limitMessage =
+          "This panel has had 4 agent-started runs in a row. A person must continue it in T3 Code, or start a new panel.";
+        const cappedPost = yield* panels
+          .post({
+            ...post,
+            commandId: CommandId.make("command:agent-post-capped"),
+            messageId: MessageId.make("message:agent-post-capped"),
+          })
+          .pipe(Effect.flip);
+        assert.equal(userFacingDispatchErrorMessage(cappedPost), limitMessage);
+        yield* stop("command:stop-at-limit");
+        const capped = yield* agentContinue("command:agent-continue-capped").pipe(Effect.flip);
+        assert.equal(userFacingDispatchErrorMessage(capped), limitMessage);
+        assert.equal(yield* count(), 4);
+
+        if (action === "post") {
+          yield* postPanel("message:person-resets-panel", "@panel-model Try again.");
+        } else {
+          yield* continuePanel("command:person-resets-panel");
+        }
+        assert.equal(yield* count(), 0);
+        yield* stop("command:stop-after-reset");
+        yield* agentContinue("command:agent-continue-after-reset");
+        assert.equal(yield* count(), 1);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect("counts only running agent-started panels toward the parent limit", () =>
+  Effect.gen(function* () {
+    const fixture = yield* panelFixture;
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const panels = yield* PanelChat.PanelChatService;
+      const agentPanel = (id: string) => ({
+        ...createPanel,
+        commandId: CommandId.make(`command:${id}`),
+        threadId: ThreadId.make(`thread:${id}`),
+        topicMessageId: MessageId.make(`message:${id}`),
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      });
+      const first = agentPanel("agent-panel-first");
+      const third = agentPanel("agent-panel-third");
+      yield* createParent(fixture.cwd);
+      yield* dispatchClient({
+        ...createPanel,
+        participants: [panelist({ instanceId: codex, model }), panelist(selection(codex, "high"))],
+      });
+      const { thread } = yield* orchestrator.getThreadRecords(panelThreadId, []);
+      assert.equal(thread.panel?.status, "running");
+      assert.deepEqual(thread.panel?.participants[0]?.modelSelection, { instanceId: codex, model });
+      const opened = yield* panels.create(first);
+      yield* panels.create(agentPanel("agent-panel-second"));
+      assert.equal((yield* panels.create(first)).sequence, opened.sequence);
+
+      const capped = yield* panels.create(third).pipe(Effect.flip);
+      assert.equal(
+        userFacingDispatchErrorMessage(capped),
+        "This thread already has 2 agent-started panel chats running. Wait for one to finish or stop it.",
+      );
+      assert.isNull(yield* orchestrator.getThreadShell(third.threadId));
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("command:stop-first-agent-panel"),
+        threadId: first.threadId,
+      });
+      yield* panels.create({
+        ...third,
+        commandId: CommandId.make("command:agent-panel-after-stop"),
+      });
+      assert.equal((yield* orchestrator.getThreadShell(third.threadId))?.panel?.status, "running");
+    }).pipe(Effect.provide(fixture.layer));
+  }),
 );
 
 it.effect("settles two panelist replies and the first panelist's conclusion", () =>
@@ -1020,10 +1214,14 @@ it.effect("returns specific setup and post validation errors through intake", ()
       const refuseCreate = Effect.fn("PanelTest.refuseCreate")(function* (
         patch: Partial<typeof createPanel>,
         message: string,
+        participant?: PanelChat.PanelChatError["participant"],
       ) {
         const error = yield* dispatchClient({ ...createPanel, ...patch }).pipe(Effect.flip);
         assert.equal(error._tag, "PanelChatError");
         assert.equal(userFacingDispatchErrorMessage(error), message);
+        if (participant !== undefined && error._tag === "PanelChatError") {
+          assert.deepEqual(error.participant, participant);
+        }
       });
       yield* createParent(fixture.cwd, false);
       yield* refuseCreate({}, "Panel chats start after the first message.");
@@ -1065,12 +1263,28 @@ it.effect("returns specific setup and post validation errors through intake", ()
           ],
         },
         "Already in this panel.",
+        { role: "panelist", index: 1 },
       );
+      const panels = yield* PanelChat.PanelChatService;
+      const duplicateAfterDefaults = yield* panels
+        .create({
+          ...createPanel,
+          createdBy: "agent",
+          creationSource: "mcp",
+          participants: [first, panelist({ instanceId: codex, model })],
+        })
+        .pipe(Effect.flip);
+      assert.deepInclude(duplicateAfterDefaults, {
+        _tag: "PanelChatError",
+        message: "Already in this panel.",
+        participant: { role: "panelist", index: 1 },
+      });
       yield* refuseCreate(
         {
           participants: [first, panelist({ ...selection(codex, "high"), model: "missing-model" })],
         },
         "This provider can't join a panel chat.",
+        { role: "panelist", index: 1 },
       );
       yield* refuseCreate(
         {
@@ -1084,6 +1298,7 @@ it.effect("returns specific setup and post validation errors through intake", ()
       yield* refuseCreate(
         { participants: [...createPanel.participants, codeAgent(selection(claude, "low"))] },
         "This provider can't be limited to reading, so it can't be the code agent.",
+        { role: "code_agent", index: 0 },
       );
       yield* Ref.set(fixture.availability, "disabled");
       yield* refuseCreate({}, "This provider can't join a panel chat.");
