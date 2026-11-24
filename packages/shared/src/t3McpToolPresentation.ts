@@ -19,6 +19,9 @@ export type T3McpToolSummaryAction =
   | "thread-list"
   | "thread-read"
   | "thread-send"
+  | "panel-start"
+  | "panel-post"
+  | "panel-continue"
   | "thread-wait"
   | "thread-interrupt"
   | "workflow-stop"
@@ -231,6 +234,13 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_list: tool(["List", "Listing", "Listed", "T3 threads"], "thread-list"),
   t3_thread_read: tool(["Read", "Reading", "Read", "a T3 thread"], "thread-read"),
   t3_thread_send: tool(["Send", "Sending", "Sent", "to a T3 thread"], "thread-send"),
+  t3_panel: tool(["Run", "Running", "Ran", "a panel chat"], "panel-start"),
+  t3_panel_start: tool(["Start", "Starting", "Started", "a panel chat"], "panel-start"),
+  t3_panel_post: tool(["Message", "Messaging", "Messaged", "a panel chat"], "panel-post"),
+  t3_panel_continue: tool(
+    ["Continue", "Continuing", "Continued", "a panel chat"],
+    "panel-continue",
+  ),
   t3_thread_wait: tool(["Wait", "Waiting", "Waited", "for a T3 thread"], "thread-wait"),
   t3_workflow_stop: tool(
     ["Stop", "Stopping", "Requested a stop for", "a workflow"],
@@ -510,6 +520,7 @@ const asSummaryInput = (input: unknown): SummaryInput | undefined =>
 /** Action tools present each call as the single-purpose tool its action replaced. */
 const ACTION_TOOLS: Readonly<Record<string, (action: string) => string | undefined>> = {
   preview_act: (action) => `preview_${action}`,
+  t3_panel: (action) => `t3_panel_${action}`,
   t3_queue: (action) => `t3_queue_${action}`,
   t3_pending_request: (action) => `t3_pending_request_${action}`,
   t3_thread_transfer: (action) =>

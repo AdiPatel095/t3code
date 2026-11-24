@@ -35,6 +35,24 @@ describe("summarizeT3ToolCalls", () => {
     ).toBe("Sent 2 messages to 1 thread");
   });
 
+  it.each([
+    {
+      calls: [
+        completed({ action: "start" }, { threadId: "panel-1" }),
+        completed({ action: "start" }, { threadId: "panel-2" }),
+      ],
+      label: "Started 2 panel chats",
+      failedCount: 0,
+    },
+    {
+      calls: [completed({ action: "start" }, { _tag: "OrchestratorMcpFailure" })],
+      label: "Tried to start 1 panel chat",
+      failedCount: 1,
+    },
+  ])("summarizes panel starts as $label", ({ calls, label, failedCount }) => {
+    expect(summarizeT3ToolCalls("panel-start", calls)).toEqual({ label, failedCount });
+  });
+
   it("counts the pull requests batch link and unlink calls changed", () => {
     const urls = ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/1", "not-a-pr"];
     const links = completed({ urls }, { linkedCount: 1 });

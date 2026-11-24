@@ -49,6 +49,12 @@ describe("resolveT3McpToolDefinition", () => {
     expect(resolveT3McpToolDefinition("t3_thread_transfer", { action: "fork" })?.displayName).toBe(
       resolveT3McpToolDefinition("t3_thread_fork")?.displayName,
     );
+    expect(resolveT3McpToolDefinition("t3_panel", { action: "post" })?.labels).toEqual([
+      "Message",
+      "Messaging",
+      "Messaged",
+      "a panel chat",
+    ]);
     expect(resolveT3McpToolDefinition("preview_act", { action: "unknown" })?.labels[2]).toBe(
       "Used",
     );

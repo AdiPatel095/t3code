@@ -1339,6 +1339,57 @@ export function summarizeT3ToolCalls(
       }
       break;
     }
+    case "panel-start": {
+      const count = countEntities(threadIds);
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Started {count} panel chat} other {Started {count} panel chats}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to start {count} panel chat} other {Tried to start {count} panel chats}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "panel-post": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Sent {count} panel message} other {Sent {count} panel messages}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to send {count} panel message} other {Tried to send {count} panel messages}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "panel-continue": {
+      const count = countEntities(threadIds);
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Continued {count} panel chat} other {Continued {count} panel chats}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to continue {count} panel chat} other {Tried to continue {count} panel chats}}",
+              { count },
+            ),
+          );
+      break;
+    }
     case "thread-create": {
       const createdIds: string[] = [];
       const resultsKnown =

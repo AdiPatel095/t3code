@@ -282,6 +282,38 @@ const T3_TOOL_SENTENCES: ReadonlyMap<string, T3ToolSentence> = new Map<string, T
     },
   ],
   [
+    "Run\nRunning\nRan\na panel chat",
+    {
+      detail: msg(
+        "{status, select, inProgress {Running a panel chat} completed {Ran a panel chat} failed {Failed to run a panel chat} declined {Declined to run a panel chat} stopped {Stopped running a panel chat} other {Running a panel chat}}",
+      ),
+    },
+  ],
+  [
+    "Start\nStarting\nStarted\na panel chat",
+    {
+      detail: msg(
+        "{status, select, inProgress {Starting a panel chat} completed {Started a panel chat} failed {Failed to start a panel chat} declined {Declined to start a panel chat} stopped {Stopped starting a panel chat} other {Starting a panel chat}}",
+      ),
+    },
+  ],
+  [
+    "Message\nMessaging\nMessaged\na panel chat",
+    {
+      detail: msg(
+        "{status, select, inProgress {Messaging a panel chat} completed {Messaged a panel chat} failed {Failed to message a panel chat} declined {Declined to message a panel chat} stopped {Stopped messaging a panel chat} other {Messaging a panel chat}}",
+      ),
+    },
+  ],
+  [
+    "Continue\nContinuing\nContinued\na panel chat",
+    {
+      detail: msg(
+        "{status, select, inProgress {Continuing a panel chat} completed {Continued a panel chat} failed {Failed to continue a panel chat} declined {Declined to continue a panel chat} stopped {Stopped continuing a panel chat} other {Continuing a panel chat}}",
+      ),
+    },
+  ],
+  [
     "Wait\nWaiting\nWaited\nfor a T3 thread",
     {
       detail: msg(
