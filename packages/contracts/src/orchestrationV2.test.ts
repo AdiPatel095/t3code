@@ -16,6 +16,7 @@ import {
   latestProviderTurnForAttempt,
   OrchestrationV2AppThreadJson,
   OrchestrationV2CheckpointFileSummary,
+  OrchestrationV2Command,
   OrchestrationV2ConversationMessageJson,
   repositoryRewindCheckpoint,
   OrchestrationV2ProviderCapabilities,
@@ -562,6 +563,22 @@ describe("panel contract compatibility", () => {
     const decoded = decode({ ...thread, panel });
     expect(decoded.panel).toEqual(panel);
     expect(decode(encode(decoded))).toEqual(decoded);
+    const agentPanel = decode({ ...thread, panel: { ...panel, agentRunsInARow: 2 } });
+    expect(encode(agentPanel).panel).toEqual({ ...panel, agentRunsInARow: 2 });
+  });
+
+  it("decodes panel posts with and without agent attribution", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const post = {
+      type: "panel.post",
+      commandId: "panel-post-command",
+      threadId: thread.id,
+      messageId: "panel-post",
+      text: "Compare the two approaches.",
+    };
+    expect(decode(post)).toEqual(post);
+    const agentPost = { ...post, createdBy: "agent", senderThreadId: "parent-thread" };
+    expect(decode(agentPost)).toEqual(agentPost);
   });
 
   it("round-trips panel turn metadata and accepts runs without it", () => {

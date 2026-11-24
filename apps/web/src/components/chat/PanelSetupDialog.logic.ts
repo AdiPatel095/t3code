@@ -1,16 +1,11 @@
-import type {
-  ModelSelection,
-  ProviderInstanceId,
-  ProviderOptionDescriptor,
-  ServerProviderModel,
-} from "@t3tools/contracts";
-import { isReasoningSelect } from "@t3tools/client-runtime/model-traits";
+import type { ModelSelection, ProviderInstanceId, ServerProviderModel } from "@t3tools/contracts";
 import {
   createModelSelection,
   getProviderOptionDescriptors,
   modelSelectionsEqual,
 } from "@t3tools/shared/model";
 import {
+  lowestPanelModelOptions,
   PANEL_MAX_PANELISTS,
   PANEL_MIN_PANELISTS,
   PANEL_TEXT_MAX_CHARS,
@@ -41,12 +36,6 @@ export interface PanelRosterPreference {
   readonly panelists: ReadonlyArray<ModelSelection>;
   readonly codeAgent: ModelSelection | null;
   readonly rounds: number;
-}
-
-export function lowestPanelModelOptions(descriptors: ReadonlyArray<ProviderOptionDescriptor>) {
-  const reasoning = descriptors.find(isReasoningSelect);
-  const lowest = reasoning?.options[0];
-  return reasoning && lowest ? [{ id: reasoning.id, value: lowest.id }] : undefined;
 }
 
 export function findPanelModel(

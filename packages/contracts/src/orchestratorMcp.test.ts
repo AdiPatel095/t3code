@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpPanelInput,
   OrchestratorMcpThreadWaitResult,
 } from "./orchestratorMcp.ts";
 
@@ -71,14 +72,53 @@ describe("orchestrator MCP contracts", () => {
 
   it("decodes a running-task next written by another version", () => {
     const next = "Completion wakes this thread, so end your turn. Do not wait on it or poll it.";
+    const result = decodeThreadWaitResult({
+      threadId: "thread-child-1",
+      runId: "run-child-1",
+      status: "running",
+      timedOut: true,
+      next,
+    });
+    expect(result.next).toBe(next);
+    expect(result).not.toHaveProperty("panel");
+  });
+
+  it("decodes a wait result with a panel conclusion", () => {
+    const panel = { state: "concluded", result: "Use the first option.", resultTruncated: true };
+    const result = decodeThreadWaitResult({
+      threadId: "panel-thread",
+      runId: "panel-run",
+      status: "completed",
+      timedOut: false,
+      panel,
+    });
+    expect(result.panel).toEqual(panel);
+  });
+
+  it("decodes JSON-text participants and clamps rounds above the panel limit", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpPanelInput);
+    const panelists = [
+      { providerInstanceId: "codex", model: "sol" },
+      { providerInstanceId: "claudeAgent", model: "opus" },
+    ];
+    const codeAgent = { providerInstanceId: "codex", model: "luna" };
     expect(
-      decodeThreadWaitResult({
-        threadId: "thread-child-1",
-        runId: "run-child-1",
-        status: "running",
-        timedOut: true,
-        next,
-      }).next,
-    ).toBe(next);
+      decode({
+        action: "start",
+        topic: "Compare the two approaches.",
+        panelists: JSON.stringify(panelists),
+        codeAgent: JSON.stringify(codeAgent),
+        rounds: 9,
+        threadId: null,
+      }),
+    ).toEqual({
+      action: "start",
+      topic: "Compare the two approaches.",
+      panelists,
+      codeAgent,
+      rounds: 5,
+      threadId: null,
+    });
+    expect(decode({ action: "start", panelists, codeAgent, rounds: 0 }).rounds).toBe(0);
   });
 });

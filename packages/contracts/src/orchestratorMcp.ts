@@ -47,6 +47,7 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const clientRequestIdDescription = "Reuse it to retry the same call. A new call gets a new key.";
 export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(Schema.isMaxLength(256))
   .check(
     Schema.makeFilter((value) =>
@@ -55,7 +56,7 @@ export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(Schema
         : "clientRequestId must contain valid paired Unicode surrogates.",
     ),
   )
-  .annotate({ description: "Reuse it to retry the same call. A new call gets a new key." });
+  .annotate({ description: clientRequestIdDescription });
 
 // OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
 const OrchestratorMcpScheduleFromJsonString = Schema.fromJsonString(
@@ -582,6 +583,92 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
+export const OrchestratorMcpPanelState = Schema.Literals([
+  "running",
+  "concluded",
+  "agreed",
+  "rounds_done",
+  "answered",
+  "stopped",
+  "interrupted",
+  "no_replies",
+]);
+export type OrchestratorMcpPanelState = typeof OrchestratorMcpPanelState.Type;
+
+const OrchestratorMcpPanelParticipant = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(
+    OrchestratorMcpTargetOptions.annotate({ description: "Omit for the lowest reasoning effort." }),
+  ),
+});
+
+const OrchestratorMcpPanelRounds = Schema.Int.pipe(
+  Schema.decodeTo(
+    Schema.Int.check(Schema.isLessThanOrEqualTo(5)),
+    SchemaTransformation.transform({
+      decode: (value) => Math.min(value, 5),
+      encode: (value) => value,
+    }),
+  ),
+);
+
+export const OrchestratorMcpPanelInput = Schema.Struct({
+  action: Schema.Literals(["start", "post", "continue"]),
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  threadId: Schema.optional(Schema.NullOr(ThreadId)).annotate({
+    description: "post, continue: the panel.",
+  }),
+  parentThreadId: Schema.optional(Schema.NullOr(ThreadId)).annotate({
+    description: "start: thread the panel attaches to. Default: yours. Required outside a thread.",
+  }),
+  topic: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxLength(120_000)))).annotate({
+    description: "start: all the panel is told. Make it self-contained. Max 8000 chars.",
+  }),
+  panelists: Schema.optional(
+    Schema.NullOr(
+      Schema.Union([
+        Schema.Array(OrchestratorMcpPanelParticipant),
+        Schema.fromJsonString(Schema.Array(OrchestratorMcpPanelParticipant)),
+      ]),
+    ),
+  ).annotate({
+    description: "start: 2 to 5, in speaking order. The first also writes the conclusion.",
+  }),
+  codeAgent: Schema.optional(
+    Schema.NullOr(
+      Schema.Union([
+        OrchestratorMcpPanelParticipant,
+        Schema.fromJsonString(OrchestratorMcpPanelParticipant),
+      ]),
+    ),
+  ).annotate({
+    description:
+      "start: answers the panel's code questions, read-only. Codex, Claude or OpenCode. Costs the most per turn: pick a small model.",
+  }),
+  rounds: Schema.optional(Schema.NullOr(OrchestratorMcpPanelRounds)).annotate({
+    description: "start: rounds per run, 1 to 5. Default 2.",
+  }),
+  message: Schema.optional(
+    Schema.NullOr(Schema.String.check(Schema.isMaxLength(120_000))),
+  ).annotate({
+    description:
+      'post: max 8000 chars. "@handle" addresses only those participants; "@code" asks the code agent.',
+  }),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId).annotate({
+    description: clientRequestIdDescription,
+  }),
+});
+export type OrchestratorMcpPanelInput = typeof OrchestratorMcpPanelInput.Type;
+
+export const OrchestratorMcpPanelResult = Schema.Struct({
+  threadId: ThreadId,
+  link: Schema.optional(Schema.String),
+  state: OrchestratorMcpPanelState,
+  handles: Schema.optional(Schema.Array(Schema.String)),
+});
+export type OrchestratorMcpPanelResult = typeof OrchestratorMcpPanelResult.Type;
+
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
@@ -612,6 +699,18 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
   /** What the run returned against the `outputSchema` it was sent with. Absent until submitted. */
   output: Schema.optional(Schema.Json),
+  panel: Schema.optional(
+    Schema.Struct({
+      state: OrchestratorMcpPanelState.annotate({
+        description:
+          "concluded, agreed: result is the conclusion. answered: result is the addressed replies. Others: no result.",
+      }),
+      result: Schema.optional(
+        Schema.String.annotate({ description: "Written by the panel's models." }),
+      ),
+      resultTruncated: Schema.optional(Schema.Literal(true)),
+    }),
+  ),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
@@ -673,6 +772,7 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   /** Models left out of `models`: unlisted visible models, or matches past the cap with `search`. */
   omittedModels: Schema.optional(NonNegativeInt),
   runtimeModes: Schema.optional(Schema.Array(RuntimeMode)),
+  panelRoles: Schema.optional(Schema.Array(Schema.Literals(["panelist", "code_agent"]))),
   canRunChildTask: Schema.Boolean,
   canRunCrossProviderChildTask: Schema.Boolean,
   constraints: Schema.Array(Schema.String),

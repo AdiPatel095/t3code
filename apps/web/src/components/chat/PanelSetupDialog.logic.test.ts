@@ -9,7 +9,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   countEligiblePanelModels,
   filterRememberedPanelRoster,
-  lowestPanelModelOptions,
   newPanelModelSelection,
   panelModelDisabledReason,
   panelSetupDisabledReason,
@@ -54,20 +53,6 @@ const high: ModelSelection = { ...first, options: [{ id: effort.id, value: "high
 const roster = { panelists: [first, second], codeAgent: null, rounds: 2 };
 
 describe("panel setup", () => {
-  it("chooses the first reasoning option for conventional and provider-defined descriptors", () => {
-    const mode: ProviderOptionDescriptor = { ...effort, id: "mode" };
-    const toggle: ProviderOptionDescriptor = { type: "boolean", id: "thinking", label: "Thinking" };
-    expect(lowestPanelModelOptions([mode, toggle, effort])).toEqual([
-      { id: "reasoningEffort", value: "low" },
-    ]);
-    expect(
-      lowestPanelModelOptions([mode, { ...effort, id: "thought_level", role: "reasoning" }]),
-    ).toEqual([{ id: "thought_level", value: "low" }]);
-    expect(lowestPanelModelOptions([mode, toggle])).toBeUndefined();
-    expect(lowestPanelModelOptions([{ ...effort, options: [] }])).toBeUndefined();
-    expect(first.options).toEqual([{ id: "reasoningEffort", value: "low" }]);
-  });
-
   it("rejects exact duplicate panelists while allowing differences in effort, instance or role", () => {
     const providers = [provider, { ...provider, instanceId: otherInstanceId }];
     expect(

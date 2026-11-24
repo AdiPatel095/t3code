@@ -1,13 +1,40 @@
+import type { ProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   derivePanelHandle,
   isPanelPass,
+  lowestPanelModelOptions,
   panelCodeCallouts,
   panelMentionedParticipantIds,
   panelReplyBudget,
   panelTitleSeed,
 } from "./panelChat.ts";
+
+describe("lowestPanelModelOptions", () => {
+  it("chooses the first reasoning option for conventional and provider-defined descriptors", () => {
+    const effort: ProviderOptionDescriptor = {
+      type: "select",
+      id: "reasoningEffort",
+      label: "Effort",
+      currentValue: "high",
+      options: [
+        { id: "low", label: "Low" },
+        { id: "high", label: "High" },
+      ],
+    };
+    const mode: ProviderOptionDescriptor = { ...effort, id: "mode" };
+    const toggle: ProviderOptionDescriptor = { type: "boolean", id: "thinking", label: "Thinking" };
+    expect(lowestPanelModelOptions([mode, toggle, effort])).toEqual([
+      { id: "reasoningEffort", value: "low" },
+    ]);
+    expect(lowestPanelModelOptions([{ ...mode, role: "reasoning" }])).toEqual([
+      { id: "mode", value: "low" },
+    ]);
+    expect(lowestPanelModelOptions([mode, toggle])).toBeUndefined();
+    expect(lowestPanelModelOptions([{ ...effort, options: [] }])).toBeUndefined();
+  });
+});
 
 describe("derivePanelHandle", () => {
   it("lowercases the source, collapses separators, and falls back for an empty handle", () => {

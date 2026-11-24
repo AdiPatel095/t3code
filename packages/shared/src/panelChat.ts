@@ -1,4 +1,8 @@
-import type { OrchestrationV2PanelParticipant } from "@t3tools/contracts";
+import type {
+  OrchestrationV2PanelParticipant,
+  ProviderOptionDescriptor,
+  ProviderOptionSelection,
+} from "@t3tools/contracts";
 
 const PANEL_MIN_PANELISTS = 2;
 const PANEL_MAX_PANELISTS = 5;
@@ -18,6 +22,8 @@ const PANEL_CODE_AGENT_QUOTE_LINES = 3;
 const PANEL_HANDLE_MAX_CHARS = 16;
 const PANEL_CODE_HANDLE = "code";
 const PANEL_TITLE_SEED_CHARS = 60;
+const PANEL_AGENT_RUNS_IN_A_ROW = 4;
+const PANEL_AGENT_RUNNING_PER_PARENT = 2;
 
 /** @public */
 export {
@@ -39,7 +45,32 @@ export {
   PANEL_HANDLE_MAX_CHARS,
   PANEL_CODE_HANDLE,
   PANEL_TITLE_SEED_CHARS,
+  PANEL_AGENT_RUNS_IN_A_ROW,
+  PANEL_AGENT_RUNNING_PER_PARENT,
 };
+
+const PANEL_REASONING_OPTION_IDS = new Set([
+  "reasoningEffort",
+  "effort",
+  "reasoning",
+  "variant",
+  "reasoning_effort",
+  "thinking_level",
+  "thought_level",
+  "thinking",
+]);
+
+export function lowestPanelModelOptions(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+): ProviderOptionSelection[] | undefined {
+  const reasoning = descriptors.find(
+    (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
+      descriptor.type === "select" &&
+      (descriptor.role === "reasoning" || PANEL_REASONING_OPTION_IDS.has(descriptor.id)),
+  );
+  const lowest = reasoning?.options[0];
+  return reasoning && lowest ? [{ id: reasoning.id, value: lowest.id }] : undefined;
+}
 
 export function derivePanelHandle(source: string, taken: ReadonlySet<string>): string {
   const normalized = source

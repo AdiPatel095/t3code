@@ -575,6 +575,8 @@ export const OrchestrationV2PanelState = Schema.Struct({
   cursor: Schema.NullOr(TrimmedNonEmptyString),
   lookupsThisRound: NonNegativeInt,
   turnCount: NonNegativeInt,
+  /** A person's post or continue resets this count. */
+  agentRunsInARow: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2PanelState = typeof OrchestrationV2PanelState.Type;
 
@@ -3400,6 +3402,10 @@ export const OrchestrationV2Command = Schema.Union([
     topicMessageId: MessageId,
     topic: Schema.String,
     createdAt: Schema.optional(Schema.DateTimeUtc),
+    /** Only the server sets these attribution fields. */
+    senderThreadId: Schema.optional(ThreadId),
+    linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+    linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   }),
   Schema.Struct({
     type: Schema.Literal("panel.post"),
@@ -3407,11 +3413,19 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     messageId: MessageId,
     text: Schema.String,
+    /** Only the server sets these attribution fields. */
+    createdBy: Schema.optional(OrchestrationV2Actor),
+    senderThreadId: Schema.optional(ThreadId),
+    linkedSender: Schema.optional(OrchestrationV2LinkedSender),
   }),
   Schema.Struct({
     type: Schema.Literal("panel.continue"),
     commandId: CommandId,
     threadId: ThreadId,
+    /** Only the server sets these attribution fields. */
+    createdBy: Schema.optional(OrchestrationV2Actor),
+    senderThreadId: Schema.optional(ThreadId),
+    linkedSender: Schema.optional(OrchestrationV2LinkedSender),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
@@ -3957,6 +3971,10 @@ const OrchestrationV2InternalCommand = Schema.Union([
     topicMessageId: MessageId,
     topic: Schema.String,
     createdAt: Schema.optional(Schema.DateTimeUtc),
+    /** Only the server sets these attribution fields. */
+    senderThreadId: Schema.optional(ThreadId),
+    linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+    linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   }),
   Schema.Struct({
     type: Schema.Literal("panel.turn.settle"),
