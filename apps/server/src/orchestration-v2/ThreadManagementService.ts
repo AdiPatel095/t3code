@@ -28,6 +28,7 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2CreationSource,
   type OrchestrationV2LinkedSender,
+  type OrchestrationV2PanelState,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2ThreadProjection,
@@ -228,6 +229,7 @@ export interface ThreadManagementWaitResult {
   readonly threadId: ThreadId;
   readonly run: OrchestrationV2Run | null;
   readonly timedOut: boolean;
+  readonly panel?: OrchestrationV2PanelState;
   /** With `untilDelegatedWorkSettled`, once settled: the run with the thread's final answer. */
   readonly resultRun?: OrchestrationV2Run;
 }
@@ -1167,6 +1169,47 @@ const make = Effect.gen(function* () {
       .getThreadEventSequence(input.threadId)
       .pipe(Effect.mapError(loadError));
     const target = yield* getProjectThreadRecords(input, ["runs"]);
+    if (input.runId === undefined && target.thread.panel !== undefined) {
+      const panelResult = (records: typeof target, panel: OrchestrationV2PanelState) => ({
+        threadId: input.threadId,
+        run: latestRun(records) ?? null,
+        timedOut: panel.status !== "idle" || panel.current !== null,
+        panel,
+      });
+      const initial = panelResult(target, target.thread.panel);
+      if (!initial.timedOut) return initial;
+
+      const readPanel = getProjectThreadRecords(input, ["runs"]).pipe(
+        Effect.flatMap((records) =>
+          records.thread.panel === undefined
+            ? Effect.fail(
+                new ThreadManagementThreadNotFoundError({
+                  projectId: input.projectId,
+                  threadId: input.threadId,
+                }),
+              )
+            : Effect.succeed(panelResult(records, records.thread.panel)),
+        ),
+      );
+      const wait = Stream.mergeAll(
+        (["panel.updated", "run.updated", "thread.deleted"] as const).map((eventType) =>
+          orchestrator.streamStoredEventsFrom({
+            threadId: input.threadId,
+            afterSequence,
+            eventType,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Stream.mapError(loadError),
+        Stream.mapEffect(() => readPanel),
+        Stream.filter((current) => !current.timedOut),
+        Stream.runHead,
+        Effect.timeoutOption(Duration.millis(Math.max(1, input.timeoutMs))),
+      );
+      const waited = Option.flatten(yield* wait);
+      return Option.isSome(waited) ? waited.value : yield* readPanel;
+    }
     const selectedRun =
       input.runId === undefined
         ? latestRun(target)

@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   MessageId,
   type OrchestrationV2Command,
+  type OrchestrationV2PanelState,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
   ProviderThreadId,
@@ -423,6 +424,93 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
       timedOut: false,
       run: { id: continuationId, status: "completed" },
     });
+    expect(result).not.toHaveProperty("panel");
+  }),
+);
+
+it.effect("waitForThread follows a panel until it is idle without a turn in flight", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:wait-panel");
+    const threadId = ThreadId.make("thread:thread-management:wait-panel");
+    const runId = RunId.make("run:thread-management:wait-panel");
+    let panel: OrchestrationV2PanelState = {
+      participants: [],
+      status: "running",
+      idleReason: null,
+      rounds: 2,
+      run: null,
+      queue: [],
+      current: { runId, participantId: "sol", kind: "reply", round: 1, timedOut: false },
+      pendingPost: null,
+      cursor: null,
+      lookupsThisRound: 0,
+      turnCount: 1,
+    };
+    let status: OrchestrationV2Run["status"] = "running";
+    const runEvents = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    const panelEvents = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    const subscribed = yield* Queue.unbounded<number>();
+    const stored = (sequence: number, event: object) =>
+      ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(4),
+          restartContinuationPending: () => Effect.succeed(false),
+          streamStoredEventsFrom: (input) => {
+            if (input?.eventType === "run.updated") return Stream.fromQueue(runEvents);
+            if (input?.eventType !== "panel.updated") return Stream.never;
+            return Stream.fromEffect(Queue.offer(subscribed, input.afterSequence ?? 0)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.fromQueue(panelEvents)),
+            );
+          },
+          getThreadRecords: () =>
+            Effect.sync(
+              () =>
+                ({
+                  thread: { id: threadId, projectId, deletedAt: null, panel },
+                  runs: [{ id: runId, ordinal: 1, status, outputSchema: { type: "object" } }],
+                }) as unknown as OrchestrationV2ThreadProjection,
+            ),
+        }),
+      ),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(layerReceiptsTest),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+    const input = { projectId, threadId, timeoutMs: 1_000 };
+    const wait = service.waitForThread({
+      ...input,
+      untilDelegatedWorkSettled: true,
+      untilOutput: true,
+    });
+    const first = yield* wait.pipe(Effect.forkChild);
+    expect(yield* Queue.take(subscribed)).toBe(4);
+
+    status = "completed";
+    yield* Queue.offer(runEvents, stored(5, { type: "run.updated", payload: { id: runId, status } }));
+    yield* TestClock.adjust(Duration.seconds(1));
+    expect(yield* Fiber.join(first)).toMatchObject({
+      timedOut: true,
+      run: { id: runId, status: "completed" },
+      panel: { status: "running" },
+    });
+    const explicitRun = yield* service.waitForThread({ ...input, runId });
+    expect(explicitRun).toMatchObject({ timedOut: false, run: { id: runId, status } });
+    expect(explicitRun).not.toHaveProperty("panel");
+
+    panel = { ...panel, status: "idle", idleReason: "stopped" };
+    const second = yield* wait.pipe(Effect.forkChild);
+    expect(yield* Queue.take(subscribed)).toBe(4);
+    panel = { ...panel, current: null };
+    yield* Queue.offer(panelEvents, stored(6, { type: "panel.updated", payload: panel }));
+    const settled = yield* Fiber.join(second);
+    expect(settled).toMatchObject({ timedOut: false, run: { id: runId, status }, panel });
+    expect(yield* wait).toEqual(settled);
   }),
 );
 
@@ -511,6 +599,7 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
       run: { id: runId, status: "completed" },
       resultRun: { id: wakeRunId, status: "completed" },
     });
+    expect(result).not.toHaveProperty("panel");
   }),
 );
 

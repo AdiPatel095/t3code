@@ -1589,6 +1589,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     readonly driver: ProviderDriverKind;
     readonly model?: string;
     readonly enabled?: boolean;
+    readonly panelChat?: NonNullable<ServerProvider["panelChat"]>;
   }): ServerProvider => ({
     instanceId: input.instanceId,
     driver: input.driver,
@@ -1605,6 +1606,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         : [{ slug: input.model, name: input.model, isCustom: false, capabilities: null }],
     slashCommands: [],
     skills: [],
+    ...(input.panelChat === undefined ? {} : { panelChat: input.panelChat }),
   });
 
   const providerRegistryLayer = (providers: ReadonlyArray<ServerProvider>) =>
@@ -2158,11 +2160,13 @@ describe("OrchestratorMcpService provider resolution", () => {
           reason: "Driver 'forkOnly' is not registered in this build.",
           checkedAt: "2026-09-13T00:00:00.000Z",
         });
+        const bothPanelRoles = { panelist: true, codeAgent: true, panelistToolsRemoved: true };
         let providers: ReadonlyArray<ServerProvider> = [
           providerSnapshot({
             instanceId: codexInstanceId,
             driver: ProviderDriverKind.make("codex"),
             model: "gpt-5.4",
+            panelChat: bothPanelRoles,
           }),
           providerSnapshot({
             instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -2183,6 +2187,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             instanceId: antigravityInstanceId,
             driver: ProviderDriverKind.make("antigravity"),
             model: "ant-model",
+            panelChat: { ...bothPanelRoles, codeAgent: false },
           }),
           providerSnapshot({
             instanceId: disabledAntigravityInstanceId,
@@ -2194,12 +2199,14 @@ describe("OrchestratorMcpService provider resolution", () => {
             instanceId: disabledWithoutAdapterInstanceId,
             driver: ProviderDriverKind.make("codex"),
             model: "gpt-5.4",
+            panelChat: bothPanelRoles,
             enabled: false,
           }),
           providerSnapshot({
             instanceId: projectDisabledInstanceId,
             driver: ProviderDriverKind.make("codex"),
             model: "gpt-5.4",
+            panelChat: bothPanelRoles,
           }),
           forkShadow,
         ];
@@ -2261,6 +2268,17 @@ describe("OrchestratorMcpService provider resolution", () => {
               provider.models.map((model) => model.slug),
             );
           }
+          assert.deepEqual(
+            capabilities.providers.flatMap((provider) =>
+              provider.panelRoles === undefined
+                ? []
+                : [[provider.providerInstanceId, provider.panelRoles]],
+            ),
+            [
+              [codexInstanceId, ["panelist", "code_agent"]],
+              [antigravityInstanceId, ["panelist"]],
+            ],
+          );
 
           providers = providers.map((provider) => ({
             ...provider,
@@ -5161,6 +5179,59 @@ describe("OrchestratorMcpService thread lookup", () => {
                   mode: input.mode === "restart" ? "restart" : "steer",
                 }),
               ),
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("directs sends to a panel chat to the panel tool", () =>
+    Effect.gen(function* () {
+      const sent = yield* Ref.make(0);
+      const projection = idleThreadProjection(launched);
+      yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const error = yield* mcp
+          .sendToThread(client, { threadId: launched.id, message: "hello" })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.equal(
+          error.message,
+          `Thread ${launched.id} is a panel chat. Post to it with \`t3_panel\` action post.`,
+        );
+        assert.equal(yield* Ref.get(sent), 0);
+      }).pipe(
+        Effect.provide(
+          service([launched], sent, {
+            sendToThread: (input) =>
+              Ref.update(sent, (count) => count + 1).pipe(
+                Effect.andThen(
+                  new ThreadManagementService.ThreadManagementNoSteerableRunError({
+                    threadId: input.threadId,
+                    mode: "steer",
+                  }),
+                ),
+              ),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                ...projection,
+                thread: {
+                  ...projection.thread,
+                  panel: {
+                    participants: [],
+                    status: "idle",
+                    idleReason: "stopped",
+                    rounds: 2,
+                    run: null,
+                    queue: [],
+                    current: null,
+                    cursor: null,
+                    pendingPost: null,
+                    lookupsThisRound: 0,
+                    turnCount: 0,
+                  },
+                },
+              }),
           }),
         ),
       );

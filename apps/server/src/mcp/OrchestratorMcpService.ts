@@ -113,6 +113,11 @@ import {
   delegatedTaskRuns,
   runOutcome,
 } from "../orchestration-v2/RestartBackgroundNote.ts";
+import {
+  panelSpeakerLabel,
+  panelWaitState,
+  panelWaitSummary,
+} from "../orchestration-v2/panel/PanelResult.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { placeholderThreadTitle } from "../orchestration-v2/placeholderThreadTitle.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -816,7 +821,7 @@ function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
 
-function stableCommandId(input: {
+export function stableCommandId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
@@ -834,7 +839,7 @@ function stableCommandId(input: {
   );
 }
 
-function stableThreadId(input: {
+export function stableThreadId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly index: number;
@@ -866,7 +871,7 @@ function stableMessageId(input: {
   );
 }
 
-function stableOperationMessageId(input: {
+export function stableOperationMessageId(input: {
   readonly scope: McpInvocationScope;
   readonly requestKey: string;
   readonly operation: string;
@@ -2853,6 +2858,12 @@ const make = Effect.gen(function* () {
             enabledForCaller ? provider : { ...provider, enabled: false },
             orchestrationCapableInstanceIds.has(provider.instanceId),
           );
+          const panelRoles =
+            constraints.length === 0 && provider.panelChat?.panelist
+              ? provider.panelChat.codeAgent
+                ? (["panelist", "code_agent"] as const)
+                : (["panelist"] as const)
+              : undefined;
           const { listed, omitted } = listCapabilityModels({
             provider,
             preferences: settings.providerModelPreferences?.[provider.instanceId],
@@ -2887,6 +2898,7 @@ const make = Effect.gen(function* () {
             canRunChildTask: constraints.length === 0,
             canRunCrossProviderChildTask: constraints.length === 0,
             constraints: [...constraints],
+            ...(panelRoles === undefined ? {} : { panelRoles }),
           };
         }),
         features: {
@@ -3645,8 +3657,7 @@ const make = Effect.gen(function* () {
           if (!assistantRunIds.has(run.id) || run.panelTurn === undefined) continue;
           const participant = participants.get(run.panelTurn.participantId);
           if (participant === undefined) continue;
-          const name = participant.role === "code_agent" ? "Code agent" : participant.name;
-          panelSpeakers.set(run.id, `${name} (@${participant.handle})`);
+          panelSpeakers.set(run.id, panelSpeakerLabel(participant));
         }
       }
       const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
@@ -3762,6 +3773,12 @@ const make = Effect.gen(function* () {
     }),
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
+      if (target.thread.panel !== undefined) {
+        return yield* failure(
+          "invalid_request",
+          `Thread ${input.threadId} is a panel chat. Post to it with \`t3_panel\` action post.`,
+        );
+      }
       yield* assertLiveCallerForOtherThread(scope, parent, target);
       yield* assertTargetWithinLimits(limits, target.thread);
 
@@ -3831,6 +3848,24 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError(threadManagementFailure));
       const status = result.run === null ? "idle" : runOutcome(result.run);
+      if (result.panel !== undefined) {
+        const state = panelWaitState(result.panel);
+        const { runs, messages } =
+          state === "concluded" || state === "agreed" || state === "answered"
+            ? yield* threadManagement
+                .getThreadRecords(input.threadId, ["runs", "messages"], {
+                  messageRoles: ["user", "assistant"],
+                })
+                .pipe(Effect.mapError(threadManagementFailure))
+            : { runs: [], messages: [] };
+        return {
+          threadId: input.threadId,
+          runId: result.run?.id ?? null,
+          status,
+          timedOut: result.timedOut,
+          panel: panelWaitSummary({ panel: result.panel, runs, messages }),
+        } satisfies OrchestratorMcpThreadWaitResult;
+      }
       // A task's first run carries no task id; the child's untagged runs continue that task
       // until it has a result.
       const taskId =
